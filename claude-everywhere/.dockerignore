@@ -1,0 +1,6 @@
+.venv
+.pytest_cache
+.auto-review
+**/__pycache__
+tests
+scripts
