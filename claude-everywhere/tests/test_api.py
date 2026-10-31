@@ -1,7 +1,8 @@
-"""The OpenAI SDK against a real server, which runs tests/fake_claude.py as claude."""
+"""The OpenAI and Anthropic SDKs against a real server, which runs tests/fake_claude.py as claude."""
 
 import time
 
+import anthropic
 import httpx
 import openai
 import pytest
@@ -106,6 +107,58 @@ def test_conversation_journey(server):
     assert resumed(server.calls()[-1]) is not None
 
 
+def test_anthropic_journey(server):
+    def send(messages, **kwargs):
+        return server.anthropic.messages.create(
+            model="claude-sonnet-5-5", max_tokens=100, messages=messages, **kwargs)
+
+    def send_streaming(messages, **kwargs):
+        with server.anthropic.messages.stream(
+            model="claude-sonnet-5-5", max_tokens=100, messages=messages, **kwargs
+        ) as stream:
+            text = "".join(stream.text_stream)
+            return text, stream.get_final_message()
+
+    # A new conversation starts a session, with the system prompt and the model.
+    system = [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}]
+    convo = [user("hello")]
+    reply = send(convo, system=system, stop_sequences=["END"])
+    assert [b.text for b in reply.content] == ["reply 1 to: hello"]
+    assert (reply.role, reply.stop_reason, reply.model) == ("assistant", "end_turn", "claude-sonnet-5-5")
+    assert (reply.usage.input_tokens, reply.usage.cache_read_input_tokens,
+            reply.usage.output_tokens) == (3, 7, 5)
+    first = server.calls()[-1]
+    assert resumed(first) is None
+    assert first["args"][first["args"].index("--append-system-prompt") + 1] == "Be brief."
+    assert first["args"][-2:] == ["--model", "claude-sonnet-5-5"]
+
+    # A streamed turn resumes that session, with content blocks as replies.
+    convo += [assistant([{"type": "text", "text": "reply 1 to: hello"}]),
+              user([{"type": "text", "text": "how are you?"}])]
+    text, final = send_streaming(convo, system=system)
+    assert text == "reply 2 to: how are you?"
+    assert [b.text for b in final.content] == [text]
+    assert (final.stop_reason, final.usage.input_tokens, final.usage.output_tokens) == ("end_turn", 3, 5)
+    second = server.calls()[-1]
+    assert resumed(second) is not None
+    assert second["prompt"] == "how are you?"
+
+    # The OpenAI API continues the same conversation.
+    openai_convo = [{"role": "system", "content": "Be brief."}, user("hello"),
+                    assistant("reply 1 to: hello"), user("how are you?"),
+                    assistant("reply 2 to: how are you?"), user("bye")]
+    assert ask(server, openai_convo) == "reply 3 to: bye"
+    assert resumed(server.calls()[-1]) not in (None, resumed(second))
+
+    # A failing turn is an API error, streamed or not, and the conversation goes on.
+    for attempt in (send, send_streaming):
+        with pytest.raises(anthropic.APIStatusError) as failure:
+            attempt(convo[:-1] + [user("poison")], system=system)
+        assert failure.value.status_code == 502
+        assert failure.value.body["error"]["type"] == "api_error"
+    assert send(convo[:-1] + [user("retry")], system=system).content[0].text == "reply 2 to: retry"
+
+
 def test_sessions_survive_a_restart(tmp_path):
     convo = [user("hello")]
     first = Server(tmp_path, str(FAKE_CLAUDE))
@@ -150,6 +203,10 @@ def test_models_usage_and_parameters(server):
     )
     assert [c.usage.total_tokens for c in stream if c.usage] == [15]
 
+    assert [m.id for m in server.anthropic.models.list()] == [
+        "claude-code", "fable", "haiku", "opus", "sonnet"
+    ]
+
 
 def test_rejects_bad_requests(server):
     with pytest.raises(openai.AuthenticationError):
@@ -160,3 +217,15 @@ def test_rejects_bad_requests(server):
                           headers={"Authorization": "Bearer test-key"})
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+    with pytest.raises(anthropic.AuthenticationError):
+        anthropic.Anthropic(base_url=server.url, api_key="wrong", max_retries=0).models.list()
+    bearer = anthropic.Anthropic(base_url=server.url, auth_token="test-key", max_retries=0)
+    assert bearer.models.list().data
+    with pytest.raises(anthropic.BadRequestError) as prefill:
+        server.anthropic.messages.create(model="haiku", max_tokens=10,
+                                         messages=[user("q"), assistant("a")])
+    assert prefill.value.body["error"]["type"] == "invalid_request_error"
+    with pytest.raises(anthropic.BadRequestError):
+        server.anthropic.messages.create(model="haiku", max_tokens=10,
+                                         messages=[{"role": "system", "content": "s"}, user("q")])

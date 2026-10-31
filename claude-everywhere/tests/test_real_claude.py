@@ -29,6 +29,15 @@ def test_real_claude_remembers_the_conversation(tmp_path):
         second = "".join(c.choices[0].delta.content or "" for c in stream if c.choices)
         assert "PELICAN" in second.upper()
 
+        convo += [
+            {"role": "assistant", "content": second},
+            {"role": "user", "content": "Spell my secret word backwards. Reply with that only."},
+        ]
+        with server.anthropic.messages.stream(
+            model="claude-code", max_tokens=100, system=convo[0]["content"], messages=convo[1:]
+        ) as stream:
+            assert "NACILEP" in "".join(stream.text_stream).upper()
+
         command = server.client.chat.completions.create(
             model="gpt-4o", messages=[{"role": "user", "content": "/usage"}])
         assert "isn't available in this environment" not in command.choices[0].message.content

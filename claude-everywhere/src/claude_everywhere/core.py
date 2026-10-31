@@ -1,4 +1,4 @@
-"""Pure functions: OpenAI messages to Claude turns, and conversation keys."""
+"""Pure functions: OpenAI and Anthropic messages to Claude turns, and conversation keys."""
 
 from __future__ import annotations
 
@@ -51,6 +51,18 @@ def normalize(raw_messages: list[dict]) -> list[Message]:
         role = ROLE_ALIASES.get(raw["role"], raw["role"])
         messages.append(Message(role, content_text(raw.get("content")).strip()))
     return messages
+
+
+def anthropic_messages(system: object, raw_messages: list[dict]) -> list[Message]:
+    """Messages of an Anthropic request, with its system prompt first when it has one.
+    The keys then match those of the same conversation sent through the OpenAI API."""
+    if not isinstance(raw_messages, list):
+        raise ValueError("messages must be a list")
+    for raw in raw_messages:
+        if not isinstance(raw, dict) or raw.get("role") not in ("user", "assistant"):
+            raise ValueError("each message needs the role user or assistant")
+    system_text = content_text(system).strip()
+    return [Message("system", system_text)] * bool(system_text) + normalize(raw_messages)
 
 
 def conversation_key(messages: list[Message] | tuple[Message, ...]) -> str:

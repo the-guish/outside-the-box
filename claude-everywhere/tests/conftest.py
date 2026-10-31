@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from anthropic import Anthropic
 from openai import OpenAI
 
 FAKE_CLAUDE = Path(__file__).with_name("fake_claude.py")
@@ -49,6 +50,7 @@ class Server:
         else:
             raise RuntimeError("server did not start")
         self.client = OpenAI(base_url=f"{self.url}/v1", api_key=API_KEY, max_retries=0)
+        self.anthropic = Anthropic(base_url=self.url, api_key=API_KEY, max_retries=0)
 
     def calls(self) -> list[dict]:
         if not self.log.exists():

@@ -1,7 +1,7 @@
 import pytest
 
 from claude_everywhere.core import (
-    Message, cli_prompt, content_text, conversation_key, normalize, reply_key, resolve_model,
+    Message, anthropic_messages, cli_prompt, content_text, conversation_key, normalize, reply_key, resolve_model,
     split_turn, transcript_prompt,
 )
 
@@ -32,6 +32,24 @@ def test_normalize(raw, expected):
 def test_normalize_rejects(raw):
     with pytest.raises(ValueError):
         normalize(raw)
+
+
+@pytest.mark.parametrize("system, raw, expected", [
+    (None, [{"role": "user", "content": "q"}], [Message(U, "q")]),
+    ("be brief", [{"role": "user", "content": "q"}], [Message(S, "be brief"), Message(U, "q")]),
+    ([{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}}], [], [Message(S, "a")]),
+    ("", [{"role": "assistant", "content": [{"type": "text", "text": "a"},
+                                            {"type": "tool_use", "id": "t", "name": "x", "input": {}}]}],
+     [Message(A, "a")]),
+])
+def test_anthropic_messages(system, raw, expected):
+    assert anthropic_messages(system, raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["q", [{"role": "system", "content": "s"}], [{"content": "q"}]])
+def test_anthropic_messages_rejects(raw):
+    with pytest.raises(ValueError):
+        anthropic_messages(None, raw)
 
 
 @pytest.mark.parametrize("messages, system, history, prompt", [

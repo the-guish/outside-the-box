@@ -1,7 +1,7 @@
 # claude-everywhere
 
-An OpenAI Chat Completions API that answers with `claude -p`. Tools that speak only the
-OpenAI API can then use Claude Code, with your Claude login.
+An OpenAI Chat Completions API and an Anthropic Messages API that answer with `claude -p`.
+Tools that speak one of these APIs can then use Claude Code, with your Claude login.
 
 ## Run
 
@@ -10,12 +10,20 @@ uv sync
 uv run claude-everywhere          # http://127.0.0.1:8787/v1
 ```
 
-Point the tool at `http://127.0.0.1:8787/v1`. Any API key works unless
+Point an OpenAI client at `http://127.0.0.1:8787/v1`. Any API key works unless
 `CLAUDE_EVERYWHERE_API_KEY` is set.
 
 ```sh
 curl http://127.0.0.1:8787/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "sonnet", "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+Point an Anthropic client at `http://127.0.0.1:8787`, for example with
+`ANTHROPIC_BASE_URL`. It sends the key as `x-api-key`.
+
+```sh
+curl http://127.0.0.1:8787/v1/messages -H 'Content-Type: application/json' \
+  -d '{"model": "sonnet", "max_tokens": 1024, "messages": [{"role": "user", "content": "hello"}]}'
 ```
 
 ## Run in Docker
@@ -49,7 +57,7 @@ therefore much safer there than on your machine.
 
 ## How conversations map to sessions
 
-OpenAI clients send the whole conversation on every request. The server keeps one Claude
+Clients of both APIs send the whole conversation on every request. The server keeps one Claude
 session per conversation and sends `claude` only the new message.
 
 - Each reply is stored in SQLite under a hash of the conversation up to and including it.
@@ -61,7 +69,8 @@ session per conversation and sends `claude` only the new message.
   prompt as a transcript. This happens with histories from elsewhere, or when the client
   changed an earlier reply.
 - System messages become `--append-system-prompt` when a session starts. Resumed sessions
-  keep them.
+  keep them. An Anthropic `system` prompt counts as the first system message.
+- Both APIs share the map. A conversation started with one API can go on with the other.
 
 ## What `claude` loads
 
@@ -80,7 +89,8 @@ Your settings for the model and permissions still apply.
 
 ## Models
 
-`/v1/models` lists `claude-code`, `fable`, `haiku`, `opus` and `sonnet`. The aliases and
+`/v1/models` lists `claude-code`, `fable`, `haiku`, `opus` and `sonnet`. A request with an
+`anthropic-version` header gets Anthropic's format. The aliases and
 full names such as `claude-sonnet-5-5` are passed to `--model`. Any other name, such as
 `gpt-4o`, uses `CLAUDE_EVERYWHERE_MODEL`, or Claude's own default when that is unset.
 
@@ -90,7 +100,7 @@ full names such as `claude-sonnet-5-5` are passed to `--model`. Any other name, 
 |---|---|---|
 | `CLAUDE_EVERYWHERE_HOST` | `127.0.0.1` | Bind address. |
 | `CLAUDE_EVERYWHERE_PORT` | `8787` | Port. |
-| `CLAUDE_EVERYWHERE_API_KEY` | unset | Bearer token clients must send. |
+| `CLAUDE_EVERYWHERE_API_KEY` | unset | Key clients must send, as a bearer token or `x-api-key`. |
 | `CLAUDE_EVERYWHERE_MODEL` | unset | Model for names Claude does not know. |
 | `CLAUDE_EVERYWHERE_TOOLS` | empty | Comma-separated `--tools`. Empty disables every tool; `default` gives the usual set. |
 | `CLAUDE_EVERYWHERE_WORKDIR` | `~/.local/share/claude-everywhere/workdir` | Directory `claude` runs in. Sessions belong to it. |
@@ -106,8 +116,11 @@ permission mode.
 
 ## Limits
 
-- Text only. Image parts and OpenAI tool calls are dropped.
+- Text only. Images, tool calls and tool results are dropped.
 - `temperature`, `max_tokens` and similar parameters are ignored.
+- A reply always stops with `end_turn` (Anthropic) or `stop` (OpenAI).
+- An Anthropic request must end with a user message. A prefilled assistant reply is an error.
+- `/v1/messages/count_tokens` and the other Anthropic endpoints do not exist.
 - Each turn starts a `claude` process, which adds a second or two.
 
 ## Tests
@@ -117,5 +130,5 @@ uv run pytest                                   # fake claude, a few seconds
 RUN_REAL_CLAUDE=1 uv run pytest -m real_claude  # the real CLI, with haiku
 ```
 
-The API tests start a real server and call it with the OpenAI SDK. `tests/fake_claude.py`
+The API tests start a real server and call it with the OpenAI and Anthropic SDKs. `tests/fake_claude.py`
 stands in for the CLI and keeps sessions on disk.

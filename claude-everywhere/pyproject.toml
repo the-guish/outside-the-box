@@ -1,7 +1,7 @@
 [project]
 name = "claude-everywhere"
 version = "0.1.0"
-description = "OpenAI Chat Completions API backed by the claude CLI"
+description = "OpenAI and Anthropic APIs backed by the claude CLI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,7 @@ dev = [
     "pytest>=8",
     "openai>=1.50",
     "httpx>=0.27",
+    "anthropic>=2.3.0",
 ]
 
 [build-system]
