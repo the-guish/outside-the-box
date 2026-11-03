@@ -38,6 +38,26 @@ def test_real_claude_remembers_the_conversation(tmp_path):
         ) as stream:
             assert "NACILEP" in "".join(stream.text_stream).upper()
 
+        # A client tool: claude calls it, waits, and uses its result.
+        tools = [{"name": "get_locker_code", "description": "Returns the code of a locker.",
+                  "input_schema": {"type": "object", "properties": {"locker": {"type": "string"}},
+                                   "required": ["locker"]}}]
+        convo = [{"role": "user", "content": "What is the code of locker B7? Use the tool."}]
+        first = server.anthropic.messages.create(model="claude-code", max_tokens=200, tools=tools,
+                                                 messages=convo)
+        assert first.stop_reason == "tool_use"
+        call = next(b for b in first.content if b.type == "tool_use")
+        assert (call.name, call.input) == ("get_locker_code", {"locker": "B7"})
+        convo += [
+            {"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in first.content]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call.id,
+                                          "content": "The code is 4417."}]},
+        ]
+        second = server.anthropic.messages.create(model="claude-code", max_tokens=200, tools=tools,
+                                                  messages=convo)
+        assert second.stop_reason == "end_turn"
+        assert "4417" in second.content[-1].text
+
         command = server.client.chat.completions.create(
             model="gpt-4o", messages=[{"role": "user", "content": "/usage"}])
         assert "isn't available in this environment" not in command.choices[0].message.content

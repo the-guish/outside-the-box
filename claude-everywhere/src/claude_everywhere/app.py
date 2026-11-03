@@ -6,19 +6,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from .bridge import Bridge, Run
 from .core import (
-    DEFAULT_MODEL_NAME, MODEL_ALIASES, Message, Turn, anthropic_messages, normalize, reply_key,
-    resolve_model, split_turn, transcript_prompt,
+    DEFAULT_MODEL_NAME, MODEL_ALIASES, Message, Turn, anthropic_messages, anthropic_tools,
+    bridged_name, normalize, reply_key, resolve_model, split_turn, tool_results, transcript_prompt,
 )
-from .runner import ClaudeError, RunResult, run_claude
+from .runner import AwaitingTools, ClaudeError, RunResult, ToolUse, run_claude
 from .sessions import SessionStore
 from .settings import Settings
 
@@ -71,10 +73,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     store = SessionStore(settings.db_path)
     slots = asyncio.Semaphore(settings.max_concurrency)
+    # claude reaches the bridge on this server. A wildcard bind address also listens on loopback.
+    host = "127.0.0.1" if settings.host in ("0.0.0.0", "::", "") else settings.host
+    bridge = Bridge(f"http://{f'[{host}]' if ':' in host else host}:{settings.port}",
+                    settings.tool_timeout)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
+        await bridge.close()
         store.close()
 
     app = FastAPI(title="claude-everywhere", lifespan=lifespan)
@@ -93,14 +100,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ):
             raise HTTPException(401, "invalid API key")
 
-    async def answer(turn: Turn, model: str | None) -> AsyncIterator[str | RunResult]:
+    async def answer(turn: Turn, model: str | None, run: Run | None = None) -> AsyncIterator:
         """Resumes the conversation's session when known, else starts one from a transcript."""
+        mcp_config = run.mcp_config() if run else None
         async with slots:
             session = store.get(turn.parent_key) if turn.history else None
             if session:
                 started = False
                 try:
-                    async for event in run_claude(settings, turn.prompt, resume=session, model=model):
+                    async for event in run_claude(settings, turn.prompt, resume=session, model=model,
+                                                  mcp_config=mcp_config):
                         started = True
                         yield event
                     return
@@ -109,27 +118,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise
                     log.warning("resuming session %s failed, starting a new one: %s", session, exc)
             prompt = transcript_prompt(turn.history, turn.prompt)
-            async for event in run_claude(settings, prompt, system=turn.system or None, model=model):
+            async for event in run_claude(settings, prompt, system=turn.system or None, model=model,
+                                          mcp_config=mcp_config):
                 yield event
 
-    async def start(
-        messages: list[Message], turn: Turn, model: str | None
-    ) -> AsyncIterator[str | RunResult]:
-        """Runs the turn up to its first event, so a failed start raises ClaudeError before
-        any response. The events that follow store the reply's session."""
-        events = answer(turn, model)
-        first = await anext(events)
+    async def reply(messages: list[Message], events: AsyncIterator, run: Run | None) -> AsyncIterator:
+        """One reply's events: up to the result, or up to a pause for client tools. The first
+        is read before this returns, so a failed start raises ClaudeError before any response.
+        A result stores the reply's session. A paused run waits in the bridge; others close."""
+        async def close() -> None:
+            await (run.close() if run else events.aclose())
 
-        async def rest() -> AsyncIterator[str | RunResult]:
+        try:
+            first = await anext(events)
+        except BaseException:
+            await close()
+            raise
+
+        async def rest() -> AsyncIterator:
+            paused = False
             try:
                 event = first
                 while event is not None:
                     if isinstance(event, RunResult) and event.session_id:
                         store.put(reply_key(messages, event.text), event.session_id)
+                    if isinstance(event, AwaitingTools):
+                        run.pause(event.ids)
+                        paused = True
                     yield event
+                    if paused:
+                        return
                     event = await anext(events, None)
             finally:
-                await events.aclose()
+                if not paused:
+                    await close()
 
         return rest()
 
@@ -160,8 +182,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         requested_model = body.get("model") or DEFAULT_MODEL_NAME
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
+        model = resolve_model(requested_model, settings.default_model)
         try:
-            events = await start(messages, turn, resolve_model(requested_model, settings.default_model))
+            events = await reply(messages, answer(turn, model), None)
         except ClaudeError as exc:
             return openai_error(502, f"claude failed: {exc}", "upstream_error")
 
@@ -214,25 +237,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body = await request.json()
             messages = anthropic_messages(body.get("system"), body["messages"])
             turn = split_turn(messages)
+            tools = anthropic_tools(body.get("tools"), settings.server_tools)
+            results = tool_results(body["messages"][-1])
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise HTTPException(400, f"invalid request: {exc}") from None
 
         requested_model = body.get("model") or DEFAULT_MODEL_NAME
         message = {"id": f"msg_{uuid.uuid4().hex}", "type": "message", "role": "assistant",
                    "model": requested_model}
+        # Results for a paused run go on with it. Otherwise, such as after a restart or a
+        # timeout, a new run gets the calls and results in its transcript.
+        run = bridge.claim(results) if results else None
+        if run:
+            run.resume(results)
+        else:
+            run = bridge.new_run(tools) if tools else None
+            events = answer(turn, resolve_model(requested_model, settings.default_model), run)
+            if run:
+                run.events = events
         try:
-            events = await start(messages, turn, resolve_model(requested_model, settings.default_model))
+            events = await reply(messages, run.events if run else events, run)
         except ClaudeError as exc:
             return anthropic_error(502, f"claude failed: {exc}")
 
+        def tool_use(call: ToolUse) -> dict:
+            return {"type": "tool_use", "id": call.id, "name": bridged_name(call.name, run.tools),
+                    "input": call.input}
+
         if not body.get("stream"):
+            text, calls, stop_reason, usage = "", [], "end_turn", {}
             try:
-                text, result = await collect(events)
+                async for event in events:
+                    if isinstance(event, str):
+                        text += event
+                    elif isinstance(event, ToolUse):
+                        calls.append(tool_use(event))
+                    elif isinstance(event, AwaitingTools):
+                        stop_reason = "tool_use"
+                    else:
+                        usage = event.usage
             except ClaudeError as exc:
                 return anthropic_error(502, f"claude failed: {exc}")
-            return {**message, "content": [{"type": "text", "text": text}],
-                    "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": anthropic_usage(result.usage)}
+            content = [{"type": "text", "text": text}] if text or not calls else []
+            return {**message, "content": content + calls, "stop_reason": stop_reason,
+                    "stop_sequence": None, "usage": anthropic_usage(usage)}
 
         def sse_event(payload: dict) -> str:
             return f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -241,19 +289,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield sse_event({"type": "message_start", "message": {
                 **message, "content": [], "stop_reason": None, "stop_sequence": None,
                 "usage": anthropic_usage({})}})
-            yield sse_event({"type": "content_block_start", "index": 0,
-                             "content_block": {"type": "text", "text": ""}})
+            index, text_open, stop_reason, usage = 0, False, "end_turn", {}
             try:
                 async for event in events:
                     if isinstance(event, str):
-                        yield sse_event({"type": "content_block_delta", "index": 0,
+                        if not text_open:
+                            yield sse_event({"type": "content_block_start", "index": index,
+                                             "content_block": {"type": "text", "text": ""}})
+                            text_open = True
+                        yield sse_event({"type": "content_block_delta", "index": index,
                                          "delta": {"type": "text_delta", "text": event}})
+                    elif isinstance(event, ToolUse):
+                        if text_open:
+                            yield sse_event({"type": "content_block_stop", "index": index})
+                            index, text_open = index + 1, False
+                        block = tool_use(event)
+                        yield sse_event({"type": "content_block_start", "index": index,
+                                         "content_block": {**block, "input": {}}})
+                        yield sse_event({"type": "content_block_delta", "index": index, "delta": {
+                            "type": "input_json_delta", "partial_json": json.dumps(block["input"])}})
+                        yield sse_event({"type": "content_block_stop", "index": index})
+                        index += 1
+                    elif isinstance(event, AwaitingTools):
+                        stop_reason = "tool_use"
                     else:
-                        yield sse_event({"type": "content_block_stop", "index": 0})
-                        yield sse_event({"type": "message_delta",
-                                         "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                                         "usage": anthropic_usage(event.usage)})
-                        yield sse_event({"type": "message_stop"})
+                        usage = event.usage
+                if text_open:
+                    yield sse_event({"type": "content_block_stop", "index": index})
+                yield sse_event({"type": "message_delta",
+                                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                                 "usage": anthropic_usage(usage)})
+                yield sse_event({"type": "message_stop"})
             except ClaudeError as exc:
                 yield sse_event(anthropic_error_body(502, f"claude failed: {exc}"))
             finally:
@@ -261,6 +327,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return StreamingResponse(sse(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
+
+    @app.post("/mcp/{run_id}")
+    async def mcp(run_id: str, request: Request):
+        """The MCP server that claude reaches client tools through. Each run has its own token."""
+        run = bridge.runs.get(run_id)
+        expected = f"Bearer {run.token}" if run else ""
+        if not run or not secrets.compare_digest(request.headers.get("authorization", ""), expected):
+            return JSONResponse({"error": "unknown run"}, status_code=404)
+        answer_ = await bridge.handle(run, await request.json())
+        return Response(status_code=202) if answer_ is None else JSONResponse(answer_)
+
+    @app.get("/mcp/{run_id}")
+    async def mcp_stream(run_id: str):
+        return Response(status_code=405)
 
     return app
 

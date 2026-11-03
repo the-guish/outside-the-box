@@ -72,6 +72,28 @@ session per conversation and sends `claude` only the new message.
   keep them. An Anthropic `system` prompt counts as the first system message.
 - Both APIs share the map. A conversation started with one API can go on with the other.
 
+## Client tools
+
+An Anthropic request can bring its own tools. Claude calls them, and the client runs them, as
+with Anthropic's API. The OpenAI API does not pass tools yet.
+
+- The server offers the request's tools to `claude` as an MCP server of its own, at
+  `/mcp/<run>`. Each run has its own token.
+- When Claude calls a tool, `claude` waits on the MCP call. The reply ends with the
+  `tool_use` blocks and `stop_reason: "tool_use"`.
+- The client runs the tools and sends the `tool_result` blocks in its next request. They
+  answer the waiting calls, and the same `claude` run goes on in that request's reply.
+- A run waits `CLAUDE_EVERYWHERE_TOOL_TIMEOUT` seconds for the results, then ends. Results
+  that come later, or after a restart, start a new session. The calls and results then go
+  into its transcript.
+- A waiting run keeps its `claude` process and counts towards `MAX_CONCURRENCY`.
+
+`CLAUDE_EVERYWHERE_SERVER_TOOLS` names Claude Code tools that run inside `claude` without
+asking. The client never sees their calls. `WebSearch` searches through your Claude account,
+for example. A server tool replaces the client tool of the same purpose: `WebSearch`
+replaces `web_search` and `WebFetch` replaces `web_fetch`. Claude then has one search tool.
+The client's approvals and logs do not cover server tools.
+
 ## What `claude` loads
 
 Each run loads only what answering needs:
@@ -81,6 +103,9 @@ Each run loads only what answering needs:
 - `--safe-mode` and `--strict-mcp-config` skip your configuration: CLAUDE.md files, hooks,
   plugins, skills and MCP servers. `claude` runs as you, so it would otherwise read your
   `~/.claude` on every request.
+- A run with client tools cannot use `--safe-mode`, which also turns off the server's MCP
+  bridge. It skips CLAUDE.md files and memory with `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and hooks with the `disableAllHooks` setting.
 - `--disable-slash-commands` stops a message like `/usage` from running as a command. The
   server also adds a space before a leading `/`, so such a message reaches the model as text.
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off telemetry and error reports.
@@ -103,11 +128,13 @@ full names such as `claude-sonnet-5-5` are passed to `--model`. Any other name, 
 | `CLAUDE_EVERYWHERE_API_KEY` | unset | Key clients must send, as a bearer token or `x-api-key`. |
 | `CLAUDE_EVERYWHERE_MODEL` | unset | Model for names Claude does not know. |
 | `CLAUDE_EVERYWHERE_TOOLS` | empty | Comma-separated `--tools`. Empty disables every tool; `default` gives the usual set. |
+| `CLAUDE_EVERYWHERE_SERVER_TOOLS` | empty | Comma-separated Claude Code tools that run without asking, such as `WebSearch`. See [Client tools](#client-tools). |
 | `CLAUDE_EVERYWHERE_WORKDIR` | `~/.local/share/claude-everywhere/workdir` | Directory `claude` runs in. Sessions belong to it. |
 | `CLAUDE_EVERYWHERE_DB` | `~/.local/share/claude-everywhere/sessions.db` | Conversation-to-session map. |
 | `CLAUDE_EVERYWHERE_EXTRA_ARGS` | empty | More `claude` arguments, shell-quoted. |
 | `CLAUDE_EVERYWHERE_MAX_CONCURRENCY` | `4` | `claude` processes running at once. |
-| `CLAUDE_EVERYWHERE_TIMEOUT` | `600` | Seconds before a run is killed. |
+| `CLAUDE_EVERYWHERE_TIMEOUT` | `600` | Seconds a run may work before it is killed. Waiting for tool results does not count. |
+| `CLAUDE_EVERYWHERE_TOOL_TIMEOUT` | `600` | Seconds a run waits for the client's tool results. |
 | `CLAUDE_EVERYWHERE_CLAUDE_BIN` | `claude` | The CLI to run. |
 
 Tools are off by default because the API can reach whatever the tools can. With tools on,
@@ -116,12 +143,14 @@ permission mode.
 
 ## Limits
 
-- Text only. Images, tool calls and tool results are dropped.
+- Text only. Images are dropped, and so are tool calls and results sent to the OpenAI API.
+- A tool result reaches Claude as text.
 - `temperature`, `max_tokens` and similar parameters are ignored.
-- A reply always stops with `end_turn` (Anthropic) or `stop` (OpenAI).
+- A reply stops with `end_turn` or `tool_use` (Anthropic), or `stop` (OpenAI).
 - An Anthropic request must end with a user message. A prefilled assistant reply is an error.
 - `/v1/messages/count_tokens` and the other Anthropic endpoints do not exist.
-- Each turn starts a `claude` process, which adds a second or two.
+- Each turn starts a `claude` process, which adds a second or two. A turn that calls client
+  tools keeps its process until the results arrive.
 
 ## Tests
 
@@ -131,4 +160,5 @@ RUN_REAL_CLAUDE=1 uv run pytest -m real_claude  # the real CLI, with haiku
 ```
 
 The API tests start a real server and call it with the OpenAI and Anthropic SDKs. `tests/fake_claude.py`
-stands in for the CLI and keeps sessions on disk.
+stands in for the CLI. It keeps sessions on disk and calls client tools through the MCP
+bridge.

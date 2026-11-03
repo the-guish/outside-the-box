@@ -1,4 +1,5 @@
-"""Runs `claude -p` and turns its stream-json output into text deltas and a result."""
+"""Runs `claude -p` and turns its stream-json output into text deltas, client tool calls
+and a result."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from .core import cli_prompt
+from .core import MCP_PREFIX, MCP_SERVER, cli_prompt
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -20,13 +21,30 @@ _exiting: set[asyncio.Task] = set()
 # Replaces Claude Code's coding-agent prompt. The client's system messages are appended to it.
 SYSTEM_PROMPT = "You are a helpful assistant."
 # Answering needs no user configuration, slash commands or telemetry.
-MINIMAL_ARGS = ["--safe-mode", "--strict-mcp-config", "--disable-slash-commands",
-                "--system-prompt", SYSTEM_PROMPT]
+MINIMAL_ARGS = ["--strict-mcp-config", "--disable-slash-commands", "--system-prompt", SYSTEM_PROMPT]
 MINIMAL_ENV = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+# --safe-mode also turns off the --mcp-config server that bridges client tools. A run with
+# client tools skips CLAUDE.md files, memory and hooks this way instead.
+BRIDGE_ENV = {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+NO_HOOKS = json.dumps({"disableAllHooks": True})
 
 
 class ClaudeError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ToolUse:
+    """A call to a client tool. Its name is the one Claude used, with the MCP prefix."""
+    id: str
+    name: str
+    input: dict
+
+
+@dataclass(frozen=True)
+class AwaitingTools:
+    """Claude ended a message with client tool calls and waits for their results."""
+    ids: tuple[str, ...]
 
 
 @dataclass
@@ -37,13 +55,22 @@ class RunResult:
 
 
 def build_args(
-    settings: Settings, *, resume: str | None, system: str | None, model: str | None
+    settings: Settings, *, resume: str | None, system: str | None, model: str | None,
+    mcp_config: str | None = None,
 ) -> list[str]:
+    tools = [t for t in (*settings.tools, *settings.server_tools) if t] or [""]
     args = [
         settings.claude_bin, "-p",
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--tools", *settings.tools, *MINIMAL_ARGS,
+        "--tools", *tools, *MINIMAL_ARGS,
     ]
+    allowed = [*([f"mcp__{MCP_SERVER}"] if mcp_config else []), *settings.server_tools]
+    if allowed:
+        args += ["--allowedTools", ",".join(allowed)]
+    if mcp_config:
+        args += ["--mcp-config", mcp_config, "--settings", NO_HOOKS]
+    else:
+        args.append("--safe-mode")
     if resume:
         args += ["--resume", resume, "--fork-session"]
     elif system:
@@ -60,15 +87,23 @@ async def run_claude(
     resume: str | None = None,
     system: str | None = None,
     model: str | None = None,
-) -> AsyncIterator[str | RunResult]:
-    """Yields each text delta as a str, then one RunResult. Raises ClaudeError on failure."""
+    mcp_config: str | None = None,
+) -> AsyncIterator[str | ToolUse | AwaitingTools | RunResult]:
+    """Yields each text delta as a str and each client tool call as a ToolUse, then one
+    RunResult. A message that calls client tools ends with AwaitingTools: the consumer
+    answers the calls through the bridge, then goes on iterating, possibly from another task.
+    Raises ClaudeError on failure. The timeout counts the time between pauses."""
     settings.workdir.mkdir(parents=True, exist_ok=True)
-    args = build_args(settings, resume=resume, system=system, model=model)
+    args = build_args(settings, resume=resume, system=system, model=model, mcp_config=mcp_config)
     log.info("running %s", shlex.join(args))
+    env = {**os.environ, **MINIMAL_ENV}
+    if mcp_config:
+        # Claude Code gives up on a tool after a minute by default; the bridge decides instead.
+        env |= {**BRIDGE_ENV, "MCP_TOOL_TIMEOUT": str(int((settings.tool_timeout + 60) * 1000))}
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=settings.workdir,
-        env={**os.environ, **MINIMAL_ENV},
+        env=env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -83,24 +118,37 @@ async def run_claude(
 
         session_id = None
         text = ""
-        async with asyncio.timeout(settings.timeout):
-            async for line in proc.stdout:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                session_id = event.get("session_id") or session_id
-                kind = event.get("type")
-                if kind == "stream_event":
-                    delta = _text_delta(event["event"], text)
-                    if delta:
-                        text += delta
-                        yield delta
-                elif kind == "result":
-                    # claude saves the session before printing the result, then takes
-                    # about a second to exit. The reply need not wait for that.
-                    result = event
-                    break
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.timeout
+        blocks: dict[int, dict] = {}  # tool_use blocks of the current message, by index
+        calls: list[str] = []
+        while line := await asyncio.wait_for(proc.stdout.readline(), deadline - loop.time()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            session_id = event.get("session_id") or session_id
+            kind = event.get("type")
+            if kind == "stream_event":
+                stream_event = event["event"]
+                delta = _text_delta(stream_event, text)
+                if delta:
+                    text += delta
+                    yield delta
+                call = _tool_use(stream_event, blocks)
+                if call:
+                    calls.append(call.id)
+                    yield call
+                if stream_event.get("type") == "message_stop" and calls:
+                    yield AwaitingTools(tuple(calls))
+                    # The next segment is a new reply to the client.
+                    calls, text = [], ""
+                    deadline = loop.time() + settings.timeout
+            elif kind == "result":
+                # claude saves the session before printing the result, then takes
+                # about a second to exit. The reply need not wait for that.
+                result = event
+                break
 
         if result is None:
             returncode = await proc.wait()
@@ -137,6 +185,24 @@ async def _wait_for_exit(proc: asyncio.subprocess.Process, stderr_task: asyncio.
         log.warning("claude (pid %s) did not exit after its result, killing it", proc.pid)
         proc.kill()
         await proc.wait()
+
+
+def _tool_use(event: dict, blocks: dict[int, dict]) -> ToolUse | None:
+    """Collects a client tool_use block; returns it complete at its content_block_stop.
+    Claude's own tools, such as WebSearch, run inside claude and are not reported."""
+    index = event.get("index")
+    if event.get("type") == "content_block_start":
+        block = event.get("content_block") or {}
+        if block.get("type") == "tool_use" and block.get("name", "").startswith(MCP_PREFIX):
+            blocks[index] = {"id": block["id"], "name": block["name"], "json": ""}
+    elif event.get("type") == "content_block_delta" and index in blocks:
+        delta = event.get("delta") or {}
+        if delta.get("type") == "input_json_delta":
+            blocks[index]["json"] += delta.get("partial_json", "")
+    elif event.get("type") == "content_block_stop" and index in blocks:
+        block = blocks.pop(index)
+        return ToolUse(block["id"], block["name"], json.loads(block["json"] or "{}"))
+    return None
 
 
 def _text_delta(event: dict, text_so_far: str) -> str:
