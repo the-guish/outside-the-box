@@ -94,6 +94,41 @@ for example. A server tool replaces the client tool of the same purpose: `WebSea
 replaces `web_search` and `WebFetch` replaces `web_fetch`. Claude then has one search tool.
 The client's approvals and logs do not cover server tools.
 
+## Cloud sessions
+
+`/cloud/mcp` is an MCP server with two tools. `start_cloud_session` starts a Claude Code
+session in the cloud (claude.ai/code) on a GitHub repository, and returns the session's link.
+An agent platform such as Robinauts can then hand work to a cloud session. The session goes
+on working by itself. `ask_about_cloud_session` answers a question about a session, from its
+log.
+
+- `CLAUDE_EVERYWHERE_CLOUD_REPOS` lists the repositories the tool may use. Without it,
+  `/cloud/mcp` answers 404.
+- The tool takes `repo`, `prompt`, and optionally `branch` and `model`.
+- Each call makes a shallow clone of the repository, then runs `claude --cloud` in it. The
+  cloud session fetches the repository from GitHub itself.
+- `claude --cloud` starts a session only on a terminal, so it runs in a pseudo-terminal. The
+  clone is marked trusted in `.claude.json` for that run, then deleted with its trust.
+- `--safe-mode` keeps the clone's hooks, settings and MCP servers from running.
+- A private repository needs `CLAUDE_EVERYWHERE_GITHUB_TOKEN` for the clone.
+- A cloud session needs a full sign-in. `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`
+  are not enough, so the server removes them for `claude --cloud`. In Docker, sign in once
+  with `docker exec -it claude-everywhere claude /login`. The sign-in stays in the volume.
+- Clients send `CLAUDE_EVERYWHERE_API_KEY` as with the other APIs.
+
+`ask_about_cloud_session` takes `session` (an id or a link), `question`, and optionally
+`model`, `haiku` by default.
+
+- The question goes to `claude -p`, whose RemoteTrigger tool reads the session's log. It
+  takes about 10 seconds.
+- The tool reads any cloud session of the signed-in account.
+- A log can quote anything its session read. A PreToolUse hook lets that run call only
+  `get_run_log`, on the session asked about.
+- `--safe-mode` drops that hook, so this run goes without it. CLAUDE.md files and memory are
+  off through the environment.
+- RemoteTrigger is off when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, so this run
+  keeps it unset.
+
 ## What `claude` loads
 
 Each run loads only what answering needs:
@@ -136,6 +171,8 @@ full names such as `claude-sonnet-5-5` are passed to `--model`. Any other name, 
 | `CLAUDE_EVERYWHERE_TIMEOUT` | `600` | Seconds a run may work before it is killed. Waiting for tool results does not count. |
 | `CLAUDE_EVERYWHERE_TOOL_TIMEOUT` | `600` | Seconds a run waits for the client's tool results. |
 | `CLAUDE_EVERYWHERE_CLAUDE_BIN` | `claude` | The CLI to run. |
+| `CLAUDE_EVERYWHERE_CLOUD_REPOS` | empty | Comma-separated `owner/name` repositories for cloud sessions. See [Cloud sessions](#cloud-sessions). |
+| `CLAUDE_EVERYWHERE_GITHUB_TOKEN` | unset | Token that clones private repositories for cloud sessions. |
 
 Tools are off by default because the API can reach whatever the tools can. With tools on,
 `claude -p` still denies the ones that need permission, unless `EXTRA_ARGS` sets a

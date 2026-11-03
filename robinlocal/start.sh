@@ -19,11 +19,14 @@ if ! curl -fs -o /dev/null "http://127.0.0.1:$CLAUDE_PORT/v1/models"; then
   [[ -n "${CLAUDE_VERSION:-}" ]] && build_args+=(--build-arg "CLAUDE_VERSION=$CLAUDE_VERSION")
   docker build -t claude-everywhere "${build_args[@]}" "$CLAUDE_DIR"
   echo "Starting claude-everywhere from $CLAUDE_DIR (it asks for the token password) ..."
+  [[ ${ROBINLOCAL_CLOUD:-1} == 1 ]] &&
+    export CLAUDE_EVERYWHERE_CLOUD_REPOS="${CLAUDE_EVERYWHERE_CLOUD_REPOS:-the-guish/robinauts}"
   "$CLAUDE_DIR/run.sh" -d
   wait_for "http://127.0.0.1:$CLAUDE_PORT/v1/models" 60 ||
     { echo "claude-everywhere did not answer on port $CLAUDE_PORT." >&2; exit 1; }
 fi
 echo "claude-everywhere on http://127.0.0.1:$CLAUDE_PORT"
+check_cloud
 
 docker compose up -d --build
 wait_for_robinauts

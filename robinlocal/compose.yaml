@@ -33,6 +33,8 @@ services:
       ROBINLOCAL_ZIP_URL: ${ROBINLOCAL_ZIP_URL:-https://github.com/the-guish/robinauts/archive/refs/heads/dev.zip}
       ROBINLOCAL_PORT: ${ROBINLOCAL_PORT:-8010}
       ROBINLOCAL_CLAUDE_URL: http://127.0.0.1:${CLAUDE_EVERYWHERE_PORT:-8787}
+      ROBINLOCAL_CLOUD: ${ROBINLOCAL_CLOUD:-1}
+      ROBINLOCAL_CLOUD_URL: ${ROBINLOCAL_CLOUD_URL:-}
       ROBINAUTS_DATABASE_URL: postgresql://robinauts:robinauts@127.0.0.1:${ROBINLOCAL_PG_PORT:-54396}/robinauts
       # claude-everywhere takes any key unless CLAUDE_EVERYWHERE_API_KEY is set.
       ROBINLOCAL_CLAUDE_KEY: ${CLAUDE_EVERYWHERE_API_KEY:-unused}

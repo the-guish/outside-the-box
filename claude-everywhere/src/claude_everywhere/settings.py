@@ -28,6 +28,8 @@ class Settings:
     tool_timeout: float
     host: str
     port: int
+    cloud_repos: tuple[str, ...] = ()
+    github_token: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -46,4 +48,6 @@ class Settings:
             tool_timeout=float(_env("TOOL_TIMEOUT", "600")),
             host=_env("HOST", "127.0.0.1"),
             port=int(_env("PORT", "8787")),
+            cloud_repos=tuple(r.strip() for r in _env("CLOUD_REPOS", "").split(",") if r.strip()),
+            github_token=_env("GITHUB_TOKEN", "") or None,
         )

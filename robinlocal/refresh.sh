@@ -3,6 +3,7 @@
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
+check_cloud
 docker compose stop robinauts
 docker compose run --rm --no-deps robinauts /scripts/entry.sh fetch
 docker compose up -d robinauts

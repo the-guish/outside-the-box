@@ -15,6 +15,20 @@ wait_for() {
   return 1
 }
 
+# Turns the cloud tool off when claude-everywhere answers without its cloud endpoint.
+check_cloud() {
+  [[ ${ROBINLOCAL_CLOUD:-1} == 1 ]] || return 0
+  local status
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$CLAUDE_PORT/cloud/mcp" \
+    -H "Authorization: Bearer ${CLAUDE_EVERYWHERE_API_KEY:-unused}" -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"ping"}')
+  if [[ $status != 200 ]]; then
+    echo "claude-everywhere has no cloud sessions (HTTP $status), so the agents run without them." >&2
+    echo "Restart it with CLAUDE_EVERYWHERE_CLOUD_REPOS set to turn them on." >&2
+    export ROBINLOCAL_CLOUD=0
+  fi
+}
+
 wait_for_robinauts() {
   echo "Waiting for http://127.0.0.1:$PORT/ (the first start builds the interface) ..."
   if ! wait_for "http://127.0.0.1:$PORT/health" 900; then

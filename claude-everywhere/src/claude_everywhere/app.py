@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .bridge import Bridge, Run
+from .cloud import CloudServer
 from .core import (
     DEFAULT_MODEL_NAME, MODEL_ALIASES, Message, Turn, anthropic_messages, anthropic_tools,
     bridged_name, normalize, reply_key, resolve_model, split_turn, tool_results, transcript_prompt,
@@ -77,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     host = "127.0.0.1" if settings.host in ("0.0.0.0", "::", "") else settings.host
     bridge = Bridge(f"http://{f'[{host}]' if ':' in host else host}:{settings.port}",
                     settings.tool_timeout)
+    cloud = CloudServer(settings, slots) if settings.cloud_repos else None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -327,6 +329,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return StreamingResponse(sse(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
+
+    @app.post("/cloud/mcp", dependencies=[Depends(authorize)])
+    async def cloud_mcp(request: Request):
+        """The MCP server that starts cloud sessions, on when CLOUD_REPOS names repositories."""
+        if not cloud:
+            return JSONResponse({"error": "cloud sessions are off"}, status_code=404)
+        answer_ = await cloud.handle(await request.json())
+        return Response(status_code=202) if answer_ is None else JSONResponse(answer_)
+
+    @app.get("/cloud/mcp")
+    async def cloud_mcp_stream():
+        return Response(status_code=405)
 
     @app.post("/mcp/{run_id}")
     async def mcp(run_id: str, request: Request):

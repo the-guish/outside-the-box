@@ -6,12 +6,18 @@ A prompt containing `poison` fails. One containing `linger` exits 5 s after its 
 `use ls and cat` on the last line calls those tools: client tools through the --mcp-config server, as claude
 does, or WebSearch when --allowedTools lets it run. The reply then lists each result.
 `fake_claude.py setup-token` prints $FAKE_SETUP_TOKEN the way `claude setup-token` does.
+`--cloud=<prompt>` prints a session link the way `claude --cloud` does, in a trusted folder on a
+terminal. With CLAUDE_CODE_OAUTH_TOKEN set, or `poison` in the prompt, it prints an error.
+`--tools RemoteTrigger` reads a session's log, as `-p --output-format json` does. It puts each
+call through the PreToolUse hook of --settings: get_run_log on the session the prompt names,
+then `list` when the question asks for routines. The reply lists what each call returned.
 Each call is logged as a JSON line to $FAKE_CLAUDE_LOG.
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -33,7 +39,59 @@ if args == ["setup-token"]:
     sys.stdout.flush()
     time.sleep(60)
     sys.exit(0)
+cloud = next((a.removeprefix("--cloud=") for a in args if a.startswith("--cloud=")), None)
+if cloud is not None:
+    log = {"args": args, "cwd": os.getcwd(), "cloud": True,
+           "files": sorted(p.name for p in Path.cwd().iterdir() if p.name != ".git")}
+    with open(os.environ["FAKE_CLAUDE_LOG"], "a") as f:
+        f.write(json.dumps(log) + "\n")
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home())) / ".claude.json"
+    trusted = config.exists() and json.loads(config.read_text()).get("projects", {}).get(
+        os.getcwd(), {}).get("hasTrustDialogAccepted")
+
+    def screen(text):  # like claude: cursor moves instead of spaces
+        sys.stdout.write("\x1b7\x1b[r\x1b8\x1b[?25h" + text.replace(" ", "\x1b[5G") + "\r\r\n")
+        sys.stdout.flush()
+
+    if not sys.stdout.isatty():
+        sys.exit("Error: --cloud cannot be combined with --print.")
+    if not trusted:
+        screen("Quick safety check: Is this a project you created or one you trust?\r\n"
+               "❯ No, exit\r\n  Yes, I trust this folder")
+        time.sleep(60)
+    elif os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        screen("Error: Unable to get organization UUID")
+    elif "poison" in cloud:
+        screen("Error: Cloud session creation failed")
+    else:
+        session = f"session_{uuid.uuid4().hex}"
+        sys.stdout.write(f"\x1b7\x1b[r\x1b8\x1b[?25hCreated cloud session: {cloud[:20]}\r\n"
+                         f"View: https://claude.ai/code/{session}?from=cli&m=0\r\n"
+                         f"Resume with: claude --teleport {session}\r\n\x1b[?25h\x1b]0;\x07")
+    sys.exit(0)
 prompt = sys.stdin.read()
+if args[args.index("--tools") + 1:][:1] == ["RemoteTrigger"]:
+    settings = json.loads(args[args.index("--settings") + 1])
+    hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    session = re.search(r"session_\w+", prompt).group(0)
+    question = prompt.strip().splitlines()[-1]
+    log = {"args": args, "prompt": prompt, "read": True,
+           "token": bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")),
+           "nonessential_traffic_off": "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" in os.environ}
+    with open(os.environ["FAKE_CLAUDE_LOG"], "a") as f:
+        f.write(json.dumps(log) + "\n")
+    outcomes = []
+    for tool_input in [{"action": "get_run_log", "session_id": session},
+                       *([{"action": "list"}] if "routines" in question else [])]:
+        hooked = subprocess.run(hook, shell=True, capture_output=True, text=True, input=json.dumps(
+            {"hook_event_name": "PreToolUse", "tool_name": "RemoteTrigger", "tool_input": tool_input}))
+        outcomes.append(f"{tool_input['action']}: " + (
+            "refused, " + hooked.stderr.strip() if hooked.returncode == 2 else "the log of " + session))
+    failed = "poison" in question
+    print(json.dumps({"type": "result", "is_error": failed, "session_id": str(uuid.uuid4()),
+                      "result": "boom: poisoned question" if failed else
+                      f"answer to: {question} | {'; '.join(outcomes)}"}))
+    sys.exit(1 if failed else 0)
 state = Path(os.environ["FAKE_CLAUDE_STATE"])
 state.mkdir(parents=True, exist_ok=True)
 

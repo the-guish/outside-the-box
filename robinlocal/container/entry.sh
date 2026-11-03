@@ -27,6 +27,10 @@ fetch() {
 }
 
 write_config() {
+  local tools=""
+  if [[ ${ROBINLOCAL_CLOUD:-0} == 1 ]]; then
+    tools='tools = ["cloud"]'
+  fi
   cat >"$CONFIG" <<TOML
 [model_providers.claude-everywhere]
 kind = "anthropic-compatible"
@@ -57,13 +61,25 @@ title = "Assistant (LangGraph)"
 model = "sonnet"
 engine = "langchain"
 system_prompt = "You are a helpful assistant."
+$tools
 
 [agents.assistant-pydantic-ai]
 title = "Assistant (Pydantic AI)"
 model = "sonnet"
 engine = "pydantic-ai"
 system_prompt = "You are a helpful assistant."
+$tools
 TOML
+  if [[ -n $tools ]]; then
+    # claude-everywhere's start_cloud_session, on when its CLOUD_REPOS names repositories.
+    cat >>"$CONFIG" <<TOML
+
+[tool_servers.cloud]
+url = "${ROBINLOCAL_CLOUD_URL:-$ROBINLOCAL_CLAUDE_URL/cloud/mcp}"
+secret_env = "ROBINLOCAL_CLAUDE_KEY"
+timeout_seconds = 180
+TOML
+  fi
 }
 
 serve() {
