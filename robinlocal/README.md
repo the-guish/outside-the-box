@@ -13,9 +13,9 @@ one local user, loopback only.
 ## How it runs
 
 - `start.sh` starts claude-everywhere with its own `run.sh -d` when nothing answers on
-  port 8787. It asks for the token password. Openworker reaches the same server.
-- `start.sh` uses only a token that exists. Without one, it stops and says so. Create the
-  token by running `../claude-everywhere/run.sh` once in a terminal of its own.
+  port 8787. Openworker reaches the same server.
+- claude-everywhere needs a sign-in, made once. `start.sh` stops without one and prints the
+  command that signs in.
 - The `work` volume holds the unzipped source, its `node_modules` and the built interface.
   The `venv` and `cache` volumes hold the installed backend and the caches of uv and npm.
 - Both agents start Claude Code cloud sessions. `start.sh` starts claude-everywhere with

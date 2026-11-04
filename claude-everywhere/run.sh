@@ -6,17 +6,7 @@ cd "$(dirname "$0")"
 
 IMAGE=claude-everywhere
 PORT="${CLAUDE_EVERYWHERE_PORT:-8787}"
-TOKEN_FILE="${CLAUDE_EVERYWHERE_TOKEN_FILE:-$HOME/.config/claude-everywhere/oauth-token.gpg}"
-
-if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  if [[ -s "$TOKEN_FILE" ]]; then
-    vault=read
-  else
-    vault=create
-    echo "No token yet. 'claude setup-token' will sign you in; the token is saved encrypted, not shown."
-  fi
-  CLAUDE_CODE_OAUTH_TOKEN="$(python3 scripts/token_vault.py "$vault" "$TOKEN_FILE")"
-fi
+VOLUME=claude-everywhere-data
 
 # Passed by name, so values stay out of the process list.
 env_args=()
@@ -32,10 +22,18 @@ done
 
 build_args=()
 [[ -n "${CLAUDE_VERSION:-}" ]] && build_args+=(--build-arg "CLAUDE_VERSION=$CLAUDE_VERSION")
-docker build -q -t "$IMAGE" "${build_args[@]}" . > /dev/null
+docker build -t "$IMAGE" "${build_args[@]}" .
+
+# claude signs in with the /login kept in the volume, unless a token or key is set.
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]] &&
+  ! docker run --rm -v "$VOLUME:/data" "$IMAGE" test -s /data/claude/.credentials.json; then
+  echo "claude-everywhere has no sign-in yet. Sign in once, in a terminal:" >&2
+  echo "  docker run --rm -it -v $VOLUME:/data $IMAGE claude /login" >&2
+  exit 1
+fi
 
 echo "claude-everywhere on http://127.0.0.1:$PORT/v1"
 exec docker run --rm --init --name claude-everywhere \
   -p "127.0.0.1:$PORT:8787" \
-  -v claude-everywhere-data:/data \
+  -v "$VOLUME:/data" \
   "${env_args[@]}" "$@" "$IMAGE"

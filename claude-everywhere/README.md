@@ -32,18 +32,16 @@ curl http://127.0.0.1:8787/v1/messages -H 'Content-Type: application/json' \
 ./run.sh        # add -d to run in the background
 ```
 
-`run.sh` builds the image and serves on `http://127.0.0.1:8787/v1`. The container needs a
-credential of its own:
+`run.sh` builds the image and serves on `http://127.0.0.1:8787/v1`. The container has a
+sign-in of its own, kept in the `claude-everywhere-data` volume. `run.sh` stops without one
+and prints the command that signs in:
 
-- `CLAUDE_CODE_OAUTH_TOKEN`: a long-lived token for your subscription. `run.sh` uses it
-  when it is set. Otherwise `run.sh` keeps one in
-  `~/.config/claude-everywhere/oauth-token.gpg`, encrypted with a password.
-- `ANTHROPIC_API_KEY`: an API key, billed per use. `run.sh` passes it when it is set.
+```sh
+docker run --rm -it -v claude-everywhere-data:/data claude-everywhere claude /login
+```
 
-The first run creates the encrypted token. `scripts/token_vault.py` runs
-`claude setup-token`, which signs you in through the browser. The script hides the token
-from the screen and asks for a new password. Each later run asks for that password.
-Delete the file to create a new token.
+`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, when set, take the place of that sign-in
+for chats. `run.sh` passes them to the container. Cloud sessions use the sign-in alone.
 
 The container does not use `~/.claude/.credentials.json`. That login renews itself, and a
 container renewing it could sign out the `claude` on your machine.

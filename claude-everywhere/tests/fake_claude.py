@@ -5,7 +5,6 @@ The reply is `reply <n> to: <last prompt line>`, where n counts the session's tu
 A prompt containing `poison` fails. One containing `linger` exits 5 s after its result.
 `use ls and cat` on the last line calls those tools: client tools through the --mcp-config server, as claude
 does, or WebSearch when --allowedTools lets it run. The reply then lists each result.
-`fake_claude.py setup-token` prints $FAKE_SETUP_TOKEN the way `claude setup-token` does.
 `--cloud=<prompt>` prints a session link the way `claude --cloud` does, in a trusted folder on a
 terminal. With CLAUDE_CODE_OAUTH_TOKEN set, or `poison` in the prompt, it prints an error.
 `--tools RemoteTrigger` reads a session's log, as `-p --output-format json` does. It puts each
@@ -25,20 +24,6 @@ import uuid
 from pathlib import Path
 
 args = sys.argv[1:]
-if args == ["setup-token"]:
-    token = os.environ["FAKE_SETUP_TOKEN"]
-    # Like the real screen: a prompt, then the token colored and wrapped, then it waits.
-    sys.stdout.write("\x1b[1mBrowser didn't open? Use the url below to sign in\x1b[22m\r\n"
-                     "https://claude.ai/oauth/authorize?code=true\r\nPaste code here if prompted > ")
-    sys.stdout.flush()
-    sys.stdin.readline()
-    wrapped = "\x1b[39m\r\n\x1b[33m".join(token[i:i + 40] for i in range(0, len(token), 40))
-    sys.stdout.write("\r\n\x1b[32m\u2713 Long-lived authentication token created successfully!\x1b[39m"
-                     f"\r\nYour OAuth token (valid for 1 year):\r\n\x1b[33m{wrapped}\x1b[39m\r\n"
-                     "\x1b[2mStore this token securely. You won't be able to see it again.\x1b[22m\r\n")
-    sys.stdout.flush()
-    time.sleep(60)
-    sys.exit(0)
 cloud = next((a.removeprefix("--cloud=") for a in args if a.startswith("--cloud=")), None)
 if cloud is not None:
     log = {"args": args, "cwd": os.getcwd(), "cloud": True,
