@@ -4,6 +4,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 PORT="${ROBINLOCAL_PORT:-8010}"
 CLAUDE_PORT="${CLAUDE_EVERYWHERE_PORT:-8787}"
 CLAUDE_DIR="${CLAUDE_EVERYWHERE_DIR:-../claude-everywhere}"
+PROJECT="${COMPOSE_PROJECT_NAME:-robinlocal}"
+
+# Compose reads .env by itself, but this script needs the token to choose the files.
+if [[ -z "${ROBINLOCAL_CLAUDE_CODE_TOKEN:-}" && -f .env ]]; then
+  ROBINLOCAL_CLAUDE_CODE_TOKEN=$(sed -n 's/^ROBINLOCAL_CLAUDE_CODE_TOKEN=//p' .env)
+  export ROBINLOCAL_CLAUDE_CODE_TOKEN
+fi
+if [[ -n "${ROBINLOCAL_CLAUDE_CODE_TOKEN:-}" ]]; then
+  export COMPOSE_FILE=compose.yaml:compose.worker.yaml
+  ROBINLOCAL_DOCKER_GID=$(stat -c %g /var/run/docker.sock)
+  export ROBINLOCAL_DOCKER_GID
+fi
 
 # Waits up to $2 seconds for $1 to answer.
 wait_for() {

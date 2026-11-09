@@ -1,0 +1,11 @@
+# Added by common.sh when ROBINLOCAL_CLAUDE_CODE_TOKEN is set. The server starts the Claude
+# Code worker with `docker run`, so it needs the Docker socket, which is root on this machine.
+services:
+  robinauts:
+    group_add:
+      - "${ROBINLOCAL_DOCKER_GID}"
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${ROBINLOCAL_CLAUDE_CODE_TOKEN}
+      ROBINLOCAL_PROJECT: ${COMPOSE_PROJECT_NAME:-robinlocal}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

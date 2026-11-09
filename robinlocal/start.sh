@@ -20,5 +20,8 @@ fi
 echo "claude-everywhere on http://127.0.0.1:$CLAUDE_PORT"
 check_cloud
 
+if [[ -z "${ROBINLOCAL_CLAUDE_CODE_TOKEN:-}" ]]; then
+  echo "No ROBINLOCAL_CLAUDE_CODE_TOKEN, so there is no Claude Code agent. See README.md."
+fi
 docker compose up -d --build
 wait_for_robinauts
