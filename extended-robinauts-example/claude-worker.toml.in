@@ -1,0 +1,74 @@
+
+# --- the Claude Code worker ---------------------------------------------------
+#
+# start.sh appends this file to robinauts.toml when CLAUDE_CODE_OAUTH_TOKEN is
+# set, and writes the result to .state/robinauts.toml. It replaces each
+# @-marked name: the command runs without a shell, so its paths and the broker
+# URL must be literal.
+
+# Anthropic itself, for the worker alone, which authenticates with the
+# subscription token. ANTHROPIC_API_KEY stays unset: the worker refuses it.
+[model_providers.claude-code]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Only the Claude Code agent can use this model. The other agents have no key
+# for this provider, so a turn of theirs on it fails.
+[models.cc-opus]
+provider = "claude-code"
+name = "claude-opus-5-5"
+title = "Claude Opus 5.5 (Claude Code)"
+
+# Claude Code runs in the container [workers.claude] starts, with its own tools
+# in /workspace/<conversation id>. The MCP servers on 127.0.0.1 are out of its
+# reach: the container is on Docker's bridge network.
+[agents.claude-code]
+title = "Claude Code"
+engine = "claude-code"
+model = "cc-opus"
+worker = "claude"
+tools = ["sessions"]
+turn_timeout_seconds = 1800
+system_prompt = """
+You work in this conversation's own directory. Say what you did.
+
+Git and GitHub:
+- git is set up for https://github.com URLs. The repositories of the flows' settings are already here, each a worktree on the branch rb/<this session's id>; work there. Clone any other repository over HTTPS into this directory.
+- Work on a new branch and push that branch. Never push to the default branch.
+- Open pull requests with GitHub's REST API from Python, using the token in GITHUB_TOKEN. gh and curl are not installed.
+- Never approve or merge a pull request. A person does that.
+- Commit messages mention no AI: no Co-Authored-By line for an AI, no session link and no "generated with" line.
+- End each pull request description with a line holding --- and then the line: Generated with Claude Code
+- Never print the token or write it to a file.
+"""
+
+# The container stays off the host's network, so the agent's Bash cannot reach
+# the services on the host's loopback. It reaches the server through the relay
+# in compose.yaml, which forwards the bridge's address to the server's port on
+# loopback alone. The no-sign-in mode answers a Host of localhost or an IP
+# alone, so the broker URL is the bridge's address.
+#
+# Every -e NAME without a value passes on the server's variable of that name:
+# start.sh sets the token, GITHUB_TOKEN and the git identity.
+[workers.claude]
+command = [
+    "docker", "run", "-i", "--rm", "--name", "robinauts-extended-claude",
+    "-e", "ROBINAUTS_CONFIG", "-e", "ROBINAUTS_WORKER_NAME",
+    "-e", "ROBINAUTS_WORKER_BROKER_URL=@BROKER_URL@",
+    "-e", "ROBINAUTS_CLAUDE_AUTH=personal", "-e", "CLAUDE_CODE_OAUTH_TOKEN",
+    # Optional: the worker clones the flows' repositories with it, and Claude
+    # Code's git and Bash inherit it. The helper is for the agent's own clones.
+    "-e", "GITHUB_TOKEN",
+    "-e", "GIT_CONFIG_COUNT=1",
+    "-e", "GIT_CONFIG_KEY_0=credential.https://github.com.helper",
+    "-e", "GIT_CONFIG_VALUE_0=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f",
+    "-e", "GIT_AUTHOR_NAME", "-e", "GIT_AUTHOR_EMAIL",
+    "-e", "GIT_COMMITTER_NAME", "-e", "GIT_COMMITTER_EMAIL",
+    # The flows' settings, for their [repositories]: a worktree of each per session.
+    "-e", "ROBINAUTS_FLOWS_DIR",
+    "-v", "@STATE@/flows:@STATE@/flows:ro",
+    "-v", "@STATE@/robinauts.toml:@STATE@/robinauts.toml:ro",
+    "-v", "robinauts-extended-claude-sessions:/var/lib/claude",
+    "-v", "robinauts-extended-claude-workspaces:/workspace",
+    "robinauts-extended-claude-code-worker",
+]

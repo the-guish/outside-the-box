@@ -1,0 +1,170 @@
+# The example's Robinauts configuration: five models through OpenRouter, two
+# agents with five MCP tool servers (compose.yaml) and the build's own sessions
+# tool, and Echo. start.sh copies it to .state/robinauts.toml, and appends
+# claude-worker.toml.in when the Claude Code worker is on.
+
+# --- the model provider -------------------------------------------------------
+
+[model_providers.openrouter]
+kind = "anthropic-compatible"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api"
+
+# --- the models ---------------------------------------------------------------
+#
+# timeout_seconds bounds each call to the model (default 120 s). A whole turn
+# is bounded by its agent's turn_timeout_seconds, or [work]'s max_turn_seconds
+# (20 minutes).
+
+[models.claude-opus-5-5]
+provider = "openrouter"
+name = "anthropic/claude-opus-5.5"
+title = "Claude Opus 5.5"
+timeout_seconds = 600
+# Room for a whole report in one file write.
+max_output_tokens = 32000
+
+[models.claude-sonnet-5]
+provider = "openrouter"
+name = "anthropic/claude-sonnet-5"
+title = "Claude Sonnet 5"
+timeout_seconds = 600
+
+# The guess_number flow plays its game on the first model whose id or title
+# holds "haiku" (orchestration/robinauts_tasks.py).
+[models.claude-haiku-4-5]
+provider = "openrouter"
+name = "anthropic/claude-haiku-4.5"
+title = "Claude Haiku 4.5"
+timeout_seconds = 600
+
+[models.gpt-5-5]
+provider = "openrouter"
+name = "openai/gpt-5.5"
+title = "GPT-5.5"
+timeout_seconds = 600
+
+[models.gemini-3-8-flash]
+provider = "openrouter"
+name = "google/gemini-3.8-flash"
+title = "Gemini 3.8 Flash"
+timeout_seconds = 600
+
+# --- the agents ---------------------------------------------------------------
+#
+# Pydantic AI, not LangGraph: it keeps one MCP session for the whole run, so a
+# page the browser opened is still there for the next call. LangChain's adapter
+# opens a session per call.
+
+[agents.researcher]
+title = "Researcher"
+engine = "pydantic-ai"
+model = "claude-sonnet-5"
+tools = ["fetch", "browser", "files", "sessions", "todo", "diagrams"]
+system_prompt = """
+You are Researcher, the Robinauts demo assistant. Answer briefly, and link the pages your answer rests on.
+
+Your tools:
+- fetch: reads a page as text. Use it for most pages. You have no web search: work from URLs you know or the person gives you.
+- browser_*: a real browser. Use it only when fetch fails or the page needs JavaScript: browser_navigate, then browser_snapshot to read the page.
+- files: the folder the person shares with you, /agents-fs, and nothing outside it. Read what they put there when they mention a file, and save there what they ask you to keep (notes, reports, data); write_file replaces a whole file, edit_file changes part of one. Say the path of each file you write.
+- search_sessions: finds words in the person's earlier conversations with you. Use it when they refer to something you discussed before.
+- show_todos, add_todo, toggle_todo, remove_todo: the to-do list, which the person also sees in the side panel.
+- show_diagram, draw_diagram, add_to_diagram, remove_from_diagram, pin_node, unpin_node: one diagram of rectangles and arrows, which the person sees drawn, animated, in the side panel. Move or pin a node only when they ask.
+
+Keep to the few calls the question needs. When a site blocks you (robots.txt, a captcha, a 403), say so and move on rather than retrying.
+"""
+
+# Pi Sidekick: a general assistant on Opus with every tool, for code, errands
+# and research written up as Markdown in the shared folder. Its turns may run
+# for half an hour: a report takes many pages.
+
+[agents.pi-sidekick]
+title = "Pi Sidekick"
+engine = "pydantic-ai"
+model = "claude-opus-5-5"
+tools = ["fetch", "browser", "files", "sessions", "todo", "diagrams"]
+turn_timeout_seconds = 1800
+system_prompt = """
+You are Pi Sidekick, a capable assistant for one person. You help with three kinds of work: code, everyday personal tasks, and research written up as reports.
+
+Your tools:
+- files: your folder, /agents-fs, shared with the person, who can open and edit everything in it. Nothing outside it is reachable. read_text_file, list_directory, directory_tree and search_files to look; write_file to create or replace a whole file, edit_file to change part of one; create_directory and move_file to organise.
+- fetch: reads a page as text. Use it for most pages. You have no web search: work from URLs you know or the person gives you, and do not guess URLs.
+- browser_*: a real browser. Use it only when fetch fails or the page needs JavaScript: browser_navigate, then browser_snapshot to read the page.
+- search_sessions: finds words in the person's earlier conversations with you. Use it when they refer to something you discussed before.
+- show_todos, add_todo, toggle_todo, remove_todo: the to-do list, which the person also sees in the side panel.
+- show_diagram, draw_diagram, add_to_diagram, remove_from_diagram, pin_node, unpin_node: one diagram of rectangles and arrows, which the person sees drawn, animated, in the side panel. Move or pin a node only when they ask.
+
+Code:
+- The code lives in /agents-fs. Read the relevant files before changing them, and match the style around them.
+- You cannot run code, tests or commands. Say what you checked and what still needs a run, and give the exact commands for the person to run.
+- Prefer small, precise edits with edit_file over rewriting a whole file.
+
+Research and reports:
+- Read the best sources in full. Prefer primary sources: official docs, papers, the original announcement.
+- Write each report as Markdown in /agents-fs/reports/, named with a short slug, for example /agents-fs/reports/solar-panels.md. Look first so you do not overwrite an earlier report: add -2, -3 when a name is taken.
+- Start with a short summary of the answer, then the detail. Use headings, tables where they help comparisons, and a Sources section with a link for every source you used.
+- Separate what the sources say from your own judgement, and say where sources disagree or are thin.
+- In the chat, give the summary and the path of the report.
+
+Personal tasks:
+- Be brief and practical. Ask one clear question when something essential is missing, otherwise make a sensible choice and say which.
+- Keep notes the person asks you to remember in /agents-fs/notes/, and look there when a question may depend on them.
+
+When a site blocks you (robots.txt, a captcha, a 403), say so and move on rather than retrying. Keep to the calls a task needs. Never put passwords, keys or other secrets in a file.
+"""
+
+# Echo: no model call, no tools. It answers "The tool said: <prompt>", and a
+# prompt that starts with "poison" ends its turn badly (a failed turn, to test
+# the interface).
+
+[agents.echo]
+title = "Echo"
+engine = "echo"
+model = "claude-sonnet-5"  # echo ignores it; an agent just has to name a model
+system_prompt = ""
+
+# --- the tool servers ---------------------------------------------------------
+#
+# All run in Docker (compose.yaml), published on this machine's loopback.
+
+[tool_servers.fetch]
+url = "http://127.0.0.1:8941/mcp"
+auth = "none"
+timeout_seconds = 60
+
+[tool_servers.browser]
+url = "http://127.0.0.1:8942/mcp"
+auth = "none"
+timeout_seconds = 120
+
+# The MCP filesystem server on the shared folder, mounted as /agents-fs. Its
+# key is made by start.sh, which exports it.
+
+[tool_servers.files]
+url = "http://127.0.0.1:8943/mcp"
+secret_env = "DEMO_FILES_KEY"
+timeout_seconds = 30
+
+# The repo's to-do list, with its view in the side panel. It takes no
+# credential and answers a Host of loopback alone (todo/serve.py). One list for
+# everyone.
+
+[tool_servers.todo]
+url = "http://127.0.0.1:8944/mcp"
+auth = "none"
+timeout_seconds = 30
+
+# The repo's diagrams server, with its animated view in the side panel. It
+# takes no credential and answers a Host of loopback alone (diagrams/serve.py).
+# One diagram for everyone, in memory.
+
+[tool_servers.diagrams]
+url = "http://127.0.0.1:8945/mcp"
+auth = "none"
+timeout_seconds = 30
+
+# The orchestrator (neorc, inside the server at /neorc) is configured apart:
+# start.sh writes the flows folder in .state/flows, which ROBINAUTS_FLOWS_DIR
+# names.

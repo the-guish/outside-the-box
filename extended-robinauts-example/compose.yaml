@@ -1,0 +1,156 @@
+# PostgreSQL and the MCP tool servers, published on this machine's loopback only.
+#
+#   db       PostgreSQL 16, data in a volume
+#   fetch    mcp-server-fetch (plain HTTP, page to markdown) behind mcp-proxy
+#   browser  Playwright MCP, headless Chromium
+#   files    the MCP filesystem server behind supergateway, on one host folder
+#            only, behind a bearer key start.sh makes
+#   todo     the repo's to-do list MCP server, with its list in a volume; it
+#            has no credential and answers a Host of loopback alone
+#   diagrams the repo's diagrams MCP server, its one diagram in memory; it
+#            has no credential and answers a Host of loopback alone
+#   relay    profile "claude": forwards the Docker bridge's address to the
+#            server on loopback, for the Claude Code worker alone
+#
+# The tools sit on networks of their own, apart from the database. Playwright
+# MCP always offers browser_run_code_unsafe (arbitrary code in its own
+# process), so a tool container must not be one hop from the conversations.
+# In their containers the tools reach the internet and the LAN. They do not
+# reach the host's 127.0.0.1, its files or the database.
+#
+# Started and stopped by start.sh and stop.sh beside it.
+
+name: robinauts-extended
+
+networks:
+  data: {}
+  web: {}
+  files: {}
+  todo: {}
+  diagrams: {}
+
+volumes:
+  pgdata: {}
+  todos: {}
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: robinauts
+      POSTGRES_DB: robinauts
+      # Read on the first start only, when the volume is empty. start.sh keeps
+      # it in .state/pg-password. Empty is allowed so that `down` needs nothing.
+      POSTGRES_PASSWORD: ${DEMO_PG_PASSWORD:-}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:54392:5432"
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "robinauts", "-d", "robinauts"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 512m
+    restart: unless-stopped
+
+  fetch:
+    build: ./fetch
+    ports:
+      - "127.0.0.1:8941:8941"
+    networks: [web]
+    mem_limit: 512m
+    pids_limit: 256
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  browser:
+    image: mcr.microsoft.com/playwright/mcp:latest
+    # The image's entrypoint already adds --headless --browser chromium --no-sandbox.
+    command:
+      - --isolated
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8931"
+      - --allowed-hosts
+      - 127.0.0.1:8942
+    ports:
+      - "127.0.0.1:8942:8931"
+    networks: [web]
+    mem_limit: 1g
+    pids_limit: 512
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  files:
+    build: ./files
+    environment:
+      # Empty is allowed here so that `down` works without it. start.sh sets it.
+      SUPERGATEWAY_API_KEY: ${DEMO_FILES_KEY:-}
+    # As the host user, so what the agent writes is the developer's to edit.
+    user: "${DEMO_UID:-1000}:${DEMO_GID:-1000}"
+    # An absolute path from start.sh: the snap's Docker has a HOME of its own.
+    volumes:
+      - ${DEMO_FILES_DIR:?is set by start.sh and stop.sh}:/agents-fs
+    ports:
+      - "127.0.0.1:8943:8943"
+    networks: [files]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  todo:
+    build:
+      context: ./todo
+      additional_contexts:
+        source: ${DEMO_REPO:?is set by start.sh and stop.sh}/mcp/to-do-list
+    volumes:
+      - todos:/data
+    ports:
+      - "127.0.0.1:8944:8944"
+    networks: [todo]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  diagrams:
+    build:
+      context: ./diagrams
+      additional_contexts:
+        source: ${DEMO_REPO:?is set by start.sh and stop.sh}/mcp/diagrams
+    ports:
+      - "127.0.0.1:8945:8945"
+    networks: [diagrams]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    pids_limit: 128
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  # The Claude Code worker's way to the server. The worker runs on Docker's
+  # default bridge, and the server listens on 127.0.0.1 alone. The relay
+  # listens on the bridge's address, takes connections from the bridge's
+  # subnet alone, and forwards them to the server's port. Nothing else on the
+  # host's loopback is reachable from the worker.
+  relay:
+    build: ./relay
+    profiles: [claude]
+    network_mode: host
+    command:
+      - socat
+      - TCP-LISTEN:${DEMO_PORT:-8000},bind=${DEMO_BRIDGE_IP:-172.17.0.1},range=${DEMO_BRIDGE_SUBNET:-172.17.0.0/16},fork,reuseaddr
+      - TCP:127.0.0.1:${DEMO_PORT:-8000}
+    read_only: true
+    mem_limit: 64m
+    pids_limit: 64
+    cap_drop: [ALL]
+    restart: unless-stopped
