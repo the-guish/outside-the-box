@@ -1,7 +1,8 @@
-"""The OpenAI SDK against a real server, which runs tests/fake_claude.py as claude."""
+"""The OpenAI and Anthropic SDKs against a real server, which runs tests/fake_claude.py as claude."""
 
 import time
 
+import anthropic
 import httpx
 import openai
 import pytest
@@ -106,6 +107,148 @@ def test_conversation_journey(server):
     assert resumed(server.calls()[-1]) is not None
 
 
+def test_anthropic_journey(server):
+    def send(messages, **kwargs):
+        return server.anthropic.messages.create(
+            model="claude-sonnet-5-5", max_tokens=100, messages=messages, **kwargs)
+
+    def send_streaming(messages, **kwargs):
+        with server.anthropic.messages.stream(
+            model="claude-sonnet-5-5", max_tokens=100, messages=messages, **kwargs
+        ) as stream:
+            text = "".join(stream.text_stream)
+            return text, stream.get_final_message()
+
+    # A new conversation starts a session, with the system prompt and the model.
+    system = [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}]
+    convo = [user("hello")]
+    reply = send(convo, system=system, stop_sequences=["END"])
+    assert [b.text for b in reply.content] == ["reply 1 to: hello"]
+    assert (reply.role, reply.stop_reason, reply.model) == ("assistant", "end_turn", "claude-sonnet-5-5")
+    assert (reply.usage.input_tokens, reply.usage.cache_read_input_tokens,
+            reply.usage.output_tokens) == (3, 7, 5)
+    first = server.calls()[-1]
+    assert resumed(first) is None
+    assert first["args"][first["args"].index("--append-system-prompt") + 1] == "Be brief."
+    assert first["args"][-2:] == ["--model", "claude-sonnet-5-5"]
+
+    # A streamed turn resumes that session, with content blocks as replies.
+    convo += [assistant([{"type": "text", "text": "reply 1 to: hello"}]),
+              user([{"type": "text", "text": "how are you?"}])]
+    text, final = send_streaming(convo, system=system)
+    assert text == "reply 2 to: how are you?"
+    assert [b.text for b in final.content] == [text]
+    assert (final.stop_reason, final.usage.input_tokens, final.usage.output_tokens) == ("end_turn", 3, 5)
+    second = server.calls()[-1]
+    assert resumed(second) is not None
+    assert second["prompt"] == "how are you?"
+
+    # The OpenAI API continues the same conversation.
+    openai_convo = [{"role": "system", "content": "Be brief."}, user("hello"),
+                    assistant("reply 1 to: hello"), user("how are you?"),
+                    assistant("reply 2 to: how are you?"), user("bye")]
+    assert ask(server, openai_convo) == "reply 3 to: bye"
+    assert resumed(server.calls()[-1]) not in (None, resumed(second))
+
+    # A failing turn is an API error, streamed or not, and the conversation goes on.
+    for attempt in (send, send_streaming):
+        with pytest.raises(anthropic.APIStatusError) as failure:
+            attempt(convo[:-1] + [user("poison")], system=system)
+        assert failure.value.status_code == 502
+        assert failure.value.body["error"]["type"] == "api_error"
+    assert send(convo[:-1] + [user("retry")], system=system).content[0].text == "reply 2 to: retry"
+
+
+TOOLS = [{"name": name, "description": f"The {name} tool.",
+          "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}
+         for name in ("ls", "cat", "web_search")]
+
+
+def tool_result(call, text, error=False):
+    return {"type": "tool_result", "tool_use_id": call.id, "content": text, "is_error": error}
+
+
+def replied(message):
+    return assistant([block.model_dump(exclude_none=True) for block in message.content])
+
+
+def send_with_tools(server, messages, stream=False):
+    kwargs = dict(model="claude-sonnet-5-5", max_tokens=100, tools=TOOLS, messages=messages)
+    if not stream:
+        return server.anthropic.messages.create(**kwargs)
+    with server.anthropic.messages.stream(**kwargs) as events:
+        return events.get_final_message()
+
+
+def test_anthropic_tool_journey(server):
+    # Claude calls a client tool: the reply ends with the call while claude waits.
+    convo = [user("use ls")]
+    first = send_with_tools(server, convo)
+    assert first.stop_reason == "tool_use"
+    assert first.content[0].text == "Let me check."
+    call = first.content[1]
+    assert (call.type, call.name, call.input) == ("tool_use", "ls", {"q": "ls"})
+    started = server.calls()[-1]
+    assert started["mcp_tools"] == ["ls", "cat", "web_search"]
+    assert started["args"][started["args"].index("--allowedTools") + 1] == "mcp__client"
+    assert "--safe-mode" not in started["args"]
+    assert started["env"] == {"MCP_TOOL_TIMEOUT": "660000", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}
+
+    # The result goes to the waiting claude, which finishes the turn.
+    convo += [replied(first), user([tool_result(call, "a.txt b.txt")])]
+    second = send_with_tools(server, convo)
+    assert second.stop_reason == "end_turn"
+    assert [b.text for b in second.content] == ["reply 1 to: use ls | ls: a.txt b.txt"]
+    assert server.calls()[-1] == started
+
+    # The next message resumes the session.
+    convo += [replied(second), user("thanks")]
+    assert send_with_tools(server, convo).content[0].text == "reply 2 to: thanks"
+    assert resumed(server.calls()[-1]) is not None
+
+    # Streamed, two calls in one message, and the client denies one.
+    convo = [user("use ls and cat")]
+    first = send_with_tools(server, convo, stream=True)
+    calls = [b for b in first.content if b.type == "tool_use"]
+    assert (first.stop_reason, [c.name for c in calls]) == ("tool_use", ["ls", "cat"])
+    convo += [replied(first), user([tool_result(calls[0], "a.txt"),
+                                    tool_result(calls[1], "denied by the user", error=True)])]
+    second = send_with_tools(server, convo, stream=True)
+    assert second.content[0].text == "reply 1 to: use ls and cat | ls: a.txt; cat failed: denied by the user"
+    assert second.stop_reason == "end_turn"
+
+    # A failing run with tools is an API error.
+    with pytest.raises(anthropic.APIStatusError) as failure:
+        send_with_tools(server, [user("poison")])
+    assert failure.value.status_code == 502
+
+
+def test_server_tools_and_expired_calls(tmp_path):
+    server = Server(tmp_path, str(FAKE_CLAUDE), {"CLAUDE_EVERYWHERE_SERVER_TOOLS": "WebSearch",
+                                                 "CLAUDE_EVERYWHERE_TOOL_TIMEOUT": "1"})
+    try:
+        # WebSearch runs inside claude, and replaces the client's web_search.
+        reply = send_with_tools(server, [user("use WebSearch")])
+        assert reply.stop_reason == "end_turn"
+        assert reply.content[0].text == "Let me check.\n\nreply 1 to: use WebSearch | WebSearch: results for WebSearch"
+        call = server.calls()[-1]
+        assert call["mcp_tools"] == ["ls", "cat"]
+        assert call["args"][call["args"].index("--tools") + 1] == "WebSearch"
+        assert call["args"][call["args"].index("--allowedTools") + 1] == "mcp__client,WebSearch"
+
+        # A call unanswered past the timeout ends its run. A late result starts a new
+        # session, with the call and its result in the transcript.
+        convo = [user("use cat")]
+        first = send_with_tools(server, convo)
+        time.sleep(1.5)
+        convo += [replied(first), user([tool_result(first.content[1], "late")])]
+        late = send_with_tools(server, convo)
+        assert late.content[0].text == f'reply 1 to: <tool_result id="{first.content[1].id}">late</tool_result>'
+        assert '<tool_call id="' in server.calls()[-1]["prompt"]
+    finally:
+        server.stop()
+
+
 def test_sessions_survive_a_restart(tmp_path):
     convo = [user("hello")]
     first = Server(tmp_path, str(FAKE_CLAUDE))
@@ -150,6 +293,10 @@ def test_models_usage_and_parameters(server):
     )
     assert [c.usage.total_tokens for c in stream if c.usage] == [15]
 
+    assert [m.id for m in server.anthropic.models.list()] == [
+        "claude-code", "fable", "haiku", "opus", "sonnet"
+    ]
+
 
 def test_rejects_bad_requests(server):
     with pytest.raises(openai.AuthenticationError):
@@ -160,3 +307,15 @@ def test_rejects_bad_requests(server):
                           headers={"Authorization": "Bearer test-key"})
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+    with pytest.raises(anthropic.AuthenticationError):
+        anthropic.Anthropic(base_url=server.url, api_key="wrong", max_retries=0).models.list()
+    bearer = anthropic.Anthropic(base_url=server.url, auth_token="test-key", max_retries=0)
+    assert bearer.models.list().data
+    with pytest.raises(anthropic.BadRequestError) as prefill:
+        server.anthropic.messages.create(model="haiku", max_tokens=10,
+                                         messages=[user("q"), assistant("a")])
+    assert prefill.value.body["error"]["type"] == "invalid_request_error"
+    with pytest.raises(anthropic.BadRequestError):
+        server.anthropic.messages.create(model="haiku", max_tokens=10,
+                                         messages=[{"role": "system", "content": "s"}, user("q")])

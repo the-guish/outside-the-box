@@ -1,8 +1,9 @@
 import pytest
 
 from claude_everywhere.core import (
-    Message, cli_prompt, content_text, conversation_key, normalize, reply_key, resolve_model,
-    split_turn, transcript_prompt,
+    Message, Tool, ToolResult, anthropic_messages, anthropic_tools, bridged_name, cli_prompt,
+    content_text, conversation_key, normalize, reply_key, resolve_model, split_turn, tool_results,
+    transcript_prompt,
 )
 
 U, A, S = "user", "assistant", "system"
@@ -14,6 +15,12 @@ U, A, S = "user", "assistant", "system"
     ([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "a\nb"),
     ([{"type": "image_url", "image_url": {"url": "x"}}, {"type": "text", "text": "a"}], "a"),
     ([{"type": "input_text", "text": "a"}, "b"], "a\nb"),
+    ([{"type": "tool_use", "id": "t1", "name": "ls", "input": {"path": ".", "all": True}}],
+     '<tool_call id="t1" name="ls">{"all": true, "path": "."}</tool_call>'),
+    ([{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "a.txt"}]}],
+     '<tool_result id="t1">a.txt</tool_result>'),
+    ([{"type": "tool_result", "tool_use_id": "t1", "content": "denied", "is_error": True}],
+     '<tool_result id="t1" error="true">denied</tool_result>'),
 ])
 def test_content_text(content, expected):
     assert content_text(content) == expected
@@ -32,6 +39,69 @@ def test_normalize(raw, expected):
 def test_normalize_rejects(raw):
     with pytest.raises(ValueError):
         normalize(raw)
+
+
+@pytest.mark.parametrize("system, raw, expected", [
+    (None, [{"role": "user", "content": "q"}], [Message(U, "q")]),
+    ("be brief", [{"role": "user", "content": "q"}], [Message(S, "be brief"), Message(U, "q")]),
+    ([{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}}], [], [Message(S, "a")]),
+    ("", [{"role": "assistant", "content": [{"type": "text", "text": "a"},
+                                            {"type": "tool_use", "id": "t", "name": "x", "input": {}}]}],
+     [Message(A, 'a\n<tool_call id="t" name="x">{}</tool_call>')]),
+])
+def test_anthropic_messages(system, raw, expected):
+    assert anthropic_messages(system, raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["q", [{"role": "system", "content": "s"}], [{"content": "q"}]])
+def test_anthropic_messages_rejects(raw):
+    with pytest.raises(ValueError):
+        anthropic_messages(None, raw)
+
+
+LS = {"name": "ls", "description": "List files.", "input_schema": {"type": "object"}}
+
+
+@pytest.mark.parametrize("raw, server_tools, expected", [
+    (None, (), ()),
+    ([LS], (), (Tool("ls", "List files.", {"type": "object"}),)),
+    ([{"name": "web_search"}], (), (Tool("web_search", "", {"type": "object"}),)),
+    ([{"name": "web_search"}, {"name": "web_fetch"}], ("WebSearch",), (Tool("web_fetch", "", {"type": "object"}),)),
+    ([{"type": "web_search_20250305", "name": "web_search"}, {"type": "custom", **LS}], (),
+     (Tool("ls", "List files.", {"type": "object"}),)),
+])
+def test_anthropic_tools(raw, server_tools, expected):
+    assert anthropic_tools(raw, server_tools) == expected
+
+
+@pytest.mark.parametrize("raw", [{"name": "ls"}, [{"description": "no name"}], ["ls"]])
+def test_anthropic_tools_rejects(raw):
+    with pytest.raises(ValueError):
+        anthropic_tools(raw)
+
+
+@pytest.mark.parametrize("message, expected", [
+    ({"role": "user", "content": "q"}, {}),
+    ({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": " a.txt\n"},
+        {"type": "tool_result", "tool_use_id": "t2", "content": "no", "is_error": True},
+        {"type": "text", "text": "and then?"}]},
+     {"t1": ToolResult("a.txt"), "t2": ToolResult("no", True)}),
+])
+def test_tool_results(message, expected):
+    assert tool_results(message) == expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("mcp__client__ls", "ls"),
+    ("mcp__client__read_file_v2", "read.file v2"),
+    ("mcp__client__unknown", "unknown"),
+    ("WebSearch", None),
+    ("mcp__other__ls", None),
+])
+def test_bridged_name(name, expected):
+    tools = (Tool("ls", "", {}), Tool("read.file v2", "", {}))
+    assert bridged_name(name, tools) == expected
 
 
 @pytest.mark.parametrize("messages, system, history, prompt", [
