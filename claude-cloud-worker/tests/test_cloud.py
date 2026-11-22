@@ -35,6 +35,7 @@ from robinauts.agent_engines.contract.ports import (
 )
 
 from claude_cloud_worker import __main__ as front
+from claude_cloud_worker import cloud, sign_in
 from claude_cloud_worker.engine import CloudEngine
 from claude_cloud_worker.settings import Settings
 
@@ -187,8 +188,11 @@ def test_a_conversation_starts_a_cloud_session_then_follows_it_up(world):
     made, followed = calls(world)
     # A new session starts on a terminal, with the agent's model. A later turn needs none.
     assert made["args"][:2] == ["--model", "opus"]
-    assert made["args"][2].startswith(f"--cloud=[tincan {session} turn 1]\nhello")
-    assert "<instructions>\nSay what you did.\n</instructions>" in made["args"][2]
+    # The session is named after the person's message, not after the marker before it.
+    assert made["args"][2:4] == ["--name", "hello"]
+    assert made["args"][4].startswith(f"--cloud=[tincan {session} turn 1]\nhello")
+    assert "<instructions>\nSay what you did.\n</instructions>" in made["args"][4]
+    assert cloud.session_name("fix  the\nbuild " + "x" * 100) == "fix the build " + "x" * 65 + "…"
     assert followed["args"][:3] == ["-p", f"[tincan {session} turn 2]\nand then?", "--cloud"]
     assert followed["args"][3].startswith("session_")
     assert followed["args"][3] in first_link(first)
@@ -210,6 +214,57 @@ def test_a_conversation_starts_a_cloud_session_then_follows_it_up(world):
     assert status["last_tool_at"]
     started = json.loads((clone / "session.json").read_text())
     assert started["conversation"] == str(session)
+
+
+def test_a_session_starts_in_the_environment_the_worker_names(world, monkeypatch):
+    listed = [
+        {"environment_id": "env_01default", "name": "Default"},
+        {"environment_id": "env_01hooks", "name": "tincan"},
+    ]
+    monkeypatch.setattr(cloud, "list_environments", lambda: listed)
+    session = uuid.uuid4()
+
+    async def run(environment):
+        engine = engine_for(world, environment=environment)
+        await engine.setup()
+        await engine.create(session)
+        return await turn(engine, session, "hello", None)
+
+    # A name is looked up in the account's list. The id goes to claude as a setting of the run.
+    assert isinstance(asyncio.run(run("tincan"))[-1], Done)
+    made = calls(world)[0]["args"]
+    chosen = json.loads(made[made.index("--settings") + 1])
+    assert chosen == {"remote": {"defaultEnvironmentId": "env_01hooks"}}
+    assert made[-1].startswith("--cloud=")
+
+    session = uuid.uuid4()
+    with pytest.raises(EngineError, match="no cloud environment is named 'tin'.*Default, tincan"):
+        asyncio.run(run("tin"))
+    assert asyncio.run(cloud.environment_id("env_01given")) == "env_01given"
+
+
+def test_the_sign_in_of_another_claude_is_copied_without_its_refresh_token(tmp_path):
+    source = tmp_path / "host" / ".credentials.json"
+    source.parent.mkdir()
+    target = tmp_path / "worker" / ".credentials.json"
+
+    def host_signs_in(token):
+        signed = {"accessToken": token, "refreshToken": "kept-by-the-host", "expiresAt": 1}
+        source.write_text(json.dumps({"claudeAiOauth": signed}))
+
+    host_signs_in("first")
+    assert sign_in.copy(source, target) is True
+    assert json.loads(target.read_text()) == {"claudeAiOauth": {"accessToken": "first", "expiresAt": 1}}
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert sign_in.copy(source, target) is False
+    # The other claude refreshed its sign-in: the next look copies the new one.
+    host_signs_in("second")
+    assert sign_in.copy(source, target) is True
+    assert json.loads(target.read_text())["claudeAiOauth"]["accessToken"] == "second"
+
+    source.unlink()
+    with pytest.raises(sign_in.NoSignIn, match="holds no sign-in of claude.ai"):
+        sign_in.copy(source, target)
 
 
 def test_a_resumed_turn_that_finished_gives_its_reply_again_and_sends_nothing(world):

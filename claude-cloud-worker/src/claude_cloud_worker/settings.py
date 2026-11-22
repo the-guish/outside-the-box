@@ -13,6 +13,7 @@ POLL_MOST_SECONDS = "CLAUDE_CLOUD_POLL_MOST_SECONDS"
 START_SECONDS = "CLAUDE_CLOUD_START_SECONDS"
 SILENT_SECONDS = "CLAUDE_CLOUD_SILENT_SECONDS"
 STATE_DIR = "CLAUDE_CLOUD_STATE"
+ENVIRONMENT = "CLAUDE_CLOUD_ENVIRONMENT"
 CLI_PATH = "ROBINAUTS_CLAUDE_CLI_PATH"
 
 
@@ -27,6 +28,8 @@ class Settings:
     state: Path
     """The sessions' records and the clone of tincan."""
     cli: str
+    environment: str = ""
+    """The cloud environment of the sessions, by id or by name; empty, claude's default one."""
     poll_seconds: float = 20.0
     poll_most_seconds: float = 120.0
     start_seconds: float = 600.0
@@ -63,6 +66,7 @@ def settings_from(environ: Mapping[str, str] = os.environ) -> Settings:
         tincan_url=environ.get(TINCAN_URL, "").strip(),
         state=Path(environ.get(STATE_DIR) or config / "cloud"),
         cli=environ.get(CLI_PATH, "").strip() or bundled_cli(),
+        environment=environ.get(ENVIRONMENT, "").strip(),
         poll_seconds=seconds(POLL_SECONDS, 20.0),
         poll_most_seconds=seconds(POLL_MOST_SECONDS, 120.0),
         start_seconds=seconds(START_SECONDS, 600.0),

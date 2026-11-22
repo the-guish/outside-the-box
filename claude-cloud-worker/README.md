@@ -44,6 +44,9 @@ A cloud session needs a full sign-in of claude.ai, the one `claude /login` write
 `claude setup-token` is refused: "Unable to get organization UUID".
 
 - The sign-in lives in the worker's volume, at `$CLAUDE_CONFIG_DIR/.credentials.json`.
+- `python -m claude_cloud_worker.sign_in <source> <target>` keeps that file equal to the
+  sign-in of a claude that runs elsewhere, without its refresh token. That claude alone
+  refreshes the sign-in. The process looks every 30 seconds.
 - `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` win over that file. The engine runs
   `claude --cloud` without them. The `claude-code` engine keeps them.
 - `claude --cloud` asks to trust a new folder, and shows first-run screens in a new
@@ -126,6 +129,7 @@ docker run --rm -it -v <the worker's volume>:/var/lib/claude --entrypoint sh cla
 | variable | default | sets |
 |---|---|---|
 | `CLAUDE_CLOUD_TINCAN_URL` | none: every turn is refused | the tincan repository |
+| `CLAUDE_CLOUD_ENVIRONMENT` | claude's default environment | the cloud environment of the sessions, by name or by id |
 | `CLAUDE_CLOUD_POLL_SECONDS` | 20 | the shortest interval of the poller |
 | `CLAUDE_CLOUD_POLL_MOST_SECONDS` | 120 | the longest interval |
 | `CLAUDE_CLOUD_START_SECONDS` | 600 | the wait for the session to take a prompt |

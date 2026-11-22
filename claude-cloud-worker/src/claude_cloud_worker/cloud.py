@@ -9,6 +9,12 @@ A cloud session needs a full sign-in, the one ``claude /login`` writes. With a t
 ``claude setup-token`` or an API key in its environment, claude finds no organization, so both
 commands run without them.
 
+A session runs in the cloud environment that claude's setting ``remote.defaultEnvironmentId``
+names. ``start`` gives it with ``--settings``, so the account's default environment stays as it
+is. The setting takes an id: ``environment_id`` finds the id of a name in the account's list.
+
+The sign-in may come from a claude that runs elsewhere: ``sign_in.py`` copies it.
+
 The terminal's reading is the one of ``claude-everywhere/src/claude_everywhere/cloud.py``.
 """
 
@@ -24,6 +30,8 @@ import select
 import struct
 import termios
 import time
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +41,7 @@ START_SECONDS = 120.0
 SEND_SECONDS = 120.0
 """How long ``claude -p --cloud`` may take to send a message."""
 AFTER_LINK = 2.0
+NAME_LENGTH = 80
 """The seconds claude may take to exit after it printed the session's link."""
 
 ESCAPES = re.compile(r"\x1b\[[0-9;?<>=]*[A-Za-z~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[78=>]")
@@ -46,6 +55,9 @@ WAITING = {
     "itrustthisfolder": "claude asks whether to trust the folder",
     "let'sgetstarted": "claude shows its first-run screens",
 }
+ENVIRONMENT_ID = re.compile(r"(env|ccpool)_\w+")
+API = "https://api.anthropic.com"
+"""Where claude lists the account's cloud environments, at ``/v1/environment_providers``."""
 TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
@@ -69,6 +81,56 @@ def environment() -> dict[str, str]:
 def config_file() -> Path:
     base = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(base) / ".claude.json" if base else Path.home() / ".claude.json"
+
+
+def _config(name: str) -> dict:
+    try:
+        data = json.loads(config_file().with_name(name).read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def list_environments() -> list[dict]:
+    """The account's cloud environments, as claude lists them, with the worker's sign-in."""
+    signed = _config(".credentials.json").get("claudeAiOauth") or {}
+    token = signed.get("accessToken")
+    organization = signed.get("organizationUuid") or (
+        _config(".claude.json").get("oauthAccount") or {}
+    ).get("organizationUuid")
+    if not token or not organization:
+        raise CloudError("the worker has no sign-in of claude.ai: run claude /login in it")
+    request = urllib.request.Request(
+        f"{API}/v1/environment_providers?limit=100",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "x-organization-uuid": organization,
+            "anthropic-version": "2023-06-01",
+            "User-Agent": "claude-cloud-worker",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as answer:
+            listed = json.load(answer).get("environments")
+    except urllib.error.HTTPError as refused:
+        raise CloudError(f"claude.ai answered {refused.code} to the list of environments") from None
+    except (OSError, ValueError) as failed:
+        raise CloudError(f"the list of environments did not come: {failed}") from None
+    return [e for e in listed or [] if isinstance(e, dict)]
+
+
+async def environment_id(named: str) -> str:
+    """The id of the cloud environment ``named``, which is an id already or a name."""
+    if ENVIRONMENT_ID.fullmatch(named):
+        return named
+    listed = await asyncio.to_thread(list_environments)
+    ids = [e["environment_id"] for e in listed if e.get("name") == named and e.get("environment_id")]
+    if len(ids) == 1:
+        return ids[0]
+    names = ", ".join(sorted(str(e.get("name")) for e in listed)) or "none"
+    if ids:
+        raise CloudError(f"{len(ids)} cloud environments are named {named!r}: give the id of one")
+    raise CloudError(f"no cloud environment is named {named!r}; the account has: {names}")
 
 
 def trust(folder: Path, config: Path | None = None) -> None:
@@ -157,11 +219,31 @@ def _read_screen(fd: int, deadline: float) -> bytes:
     return out
 
 
-async def start(cli: str, folder: Path, message: str, model: str | None) -> CloudSession:
+def session_name(prompt: str) -> str:
+    """The name of a session on claude.ai: the start of the person's first message."""
+    words = " ".join(prompt.split())
+    return words if len(words) <= NAME_LENGTH else words[: NAME_LENGTH - 1].rstrip() + "…"
+
+
+async def start(
+    cli: str,
+    folder: Path,
+    message: str,
+    model: str | None,
+    environment_id: str = "",
+    name: str = "",
+) -> CloudSession:
     """Starts a cloud session on the repository of ``folder``, with ``message`` as its first
-    prompt."""
+    prompt. It runs in the environment ``environment_id``, or in claude's default one. Without
+    ``name``, claude.ai names the session after the start of ``message``."""
     trust(folder)
-    args = [cli, *(["--model", model] if model else []), f"--cloud={message}"]
+    args = [cli, *(["--model", model] if model else [])]
+    if name:
+        args += ["--name", name]
+    if environment_id:
+        chosen = {"remote": {"defaultEnvironmentId": environment_id}}
+        args += ["--settings", json.dumps(chosen)]
+    args.append(f"--cloud={message}")
     controller, terminal = pty.openpty()
     fcntl.ioctl(terminal, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
     try:

@@ -192,7 +192,11 @@ class CloudEngine(AgentEngine):
             else:
                 if agent.system_prompt.strip():
                     message = f"{message}\n\n<instructions>\n{agent.system_prompt}\n</instructions>"
-                sent = await cloud.start(cli, folder, message, model)
+                named = self._container.environment
+                where = await cloud.environment_id(named) if named else ""
+                # The message starts with the marker, which says nothing in claude.ai's list.
+                called = cloud.session_name(prompt)
+                sent = await cloud.start(cli, folder, message, model, where, called)
         except cloud.CloudError as refused:
             raise EngineError(f"claude --cloud refused the prompt: {refused}") from None
         record["cloud_session"] = record["cloud_session"] or sent.id
